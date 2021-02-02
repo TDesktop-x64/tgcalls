@@ -50,6 +50,7 @@ struct GroupInstanceDescriptor {
     std::string initialOutputDeviceId;
     bool debugIgnoreMissingSsrcs = false;
     std::function<rtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> createAudioDeviceModule;
+    bool enableRadioMode = false;
 };
 
 struct GroupJoinPayloadFingerprint {

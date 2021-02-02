@@ -1046,7 +1046,8 @@ public:
     _audioLevelsUpdated(descriptor.audioLevelsUpdated),
     _initialInputDeviceId(descriptor.initialInputDeviceId),
     _initialOutputDeviceId(descriptor.initialOutputDeviceId),
-    _createAudioDeviceModule(descriptor.createAudioDeviceModule) {
+    _createAudioDeviceModule(descriptor.createAudioDeviceModule),
+    _radioMode(descriptor.enableRadioMode) {
 		auto generator = std::mt19937(std::random_device()());
 		auto distribution = std::uniform_int_distribution<uint32_t>();
 		do {
@@ -1123,14 +1124,25 @@ public:
 	void start() {
         const auto weak = std::weak_ptr<GroupInstanceManager>(shared_from_this());
 
-        webrtc::field_trial::InitFieldTrialsFromString(
-            //"WebRTC-Audio-SendSideBwe/Enabled/"
-            "WebRTC-Audio-Allocation/min:32kbps,max:32kbps/"
-            "WebRTC-Audio-OpusMinPacketLossRate/Enabled-1/"
-            //"WebRTC-FlexFEC-03/Enabled/"
-            //"WebRTC-FlexFEC-03-Advertised/Enabled/"
-            "WebRTC-PcFactoryDefaultBitrates/min:32kbps,start:32kbps,max:32kbps/"
-        );
+        if (_radioMode) {
+			webrtc::field_trial::InitFieldTrialsFromString(
+					//"WebRTC-Audio-SendSideBwe/Enabled/"
+					"WebRTC-Audio-Allocation/min:256kbps,max:256kbps/"
+					"WebRTC-Audio-OpusMinPacketLossRate/Enabled-1/"
+					//"WebRTC-FlexFEC-03/Enabled/"
+					//"WebRTC-FlexFEC-03-Advertised/Enabled/"
+					"WebRTC-PcFactoryDefaultBitrates/min:256kbps,start:256kbps,max:256kbps/"
+			);
+        } else {
+			webrtc::field_trial::InitFieldTrialsFromString(
+					//"WebRTC-Audio-SendSideBwe/Enabled/"
+					"WebRTC-Audio-Allocation/min:32kbps,max:32kbps/"
+					"WebRTC-Audio-OpusMinPacketLossRate/Enabled-1/"
+					//"WebRTC-FlexFEC-03/Enabled/"
+					//"WebRTC-FlexFEC-03-Advertised/Enabled/"
+					"WebRTC-PcFactoryDefaultBitrates/min:32kbps,start:32kbps,max:32kbps/"
+			);
+        }
 
         PlatformInterface::SharedInstance()->configurePlatformAudio();
 
@@ -1217,7 +1229,11 @@ public:
 
         apm->ApplyConfig(audioConfig);
 
-        mediaDeps.audio_processing = apm;
+        if (_radioMode) {
+            mediaDeps.audio_processing = nullptr;
+        } else {
+            mediaDeps.audio_processing = apm;
+        }
 
         mediaDeps.onUnknownAudioSsrc = [weak](uint32_t ssrc) {
             getMediaThread()->PostTask(RTC_FROM_HERE, [weak, ssrc](){
@@ -2012,6 +2028,8 @@ private:
     std::map<uint32_t, std::shared_ptr<AudioTrackSinkInterfaceImpl>> _audioTrackSinks;
     std::map<uint32_t, GroupLevelValue> _audioLevels;
     std::map<uint32_t, double> _audioTrackVolumes;
+
+    bool _radioMode = false;
 
 };
 
