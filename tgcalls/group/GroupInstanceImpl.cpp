@@ -1136,7 +1136,7 @@ public:
         } else {
 			webrtc::field_trial::InitFieldTrialsFromString(
 					//"WebRTC-Audio-SendSideBwe/Enabled/"
-					"WebRTC-Audio-Allocation/min:32kbps,max:32kbps/"
+					"WebRTC-Audio-Allocation/min:256kbps,max:256kbps/"
 					"WebRTC-Audio-OpusMinPacketLossRate/Enabled-1/"
 					//"WebRTC-FlexFEC-03/Enabled/"
 					//"WebRTC-FlexFEC-03-Advertised/Enabled/"
