@@ -1028,7 +1028,7 @@ std::string adjustLocalDescription(const std::string &sdp) {
         result << it << "\n";
         if (!foundAudio && it.compare(0, pattern.size(), pattern) == 0) {
             foundAudio = true;
-            result << "b=AS:" << 32 << "\n";
+            result << "b=AS:" << 256 << "\n";
         }
     }
 
