@@ -1229,11 +1229,7 @@ public:
 
         apm->ApplyConfig(audioConfig);
 
-        if (_radioMode) {
-            mediaDeps.audio_processing = nullptr;
-        } else {
-            mediaDeps.audio_processing = apm;
-        }
+        mediaDeps.audio_processing = apm;
 
         mediaDeps.onUnknownAudioSsrc = [weak](uint32_t ssrc) {
             getMediaThread()->PostTask(RTC_FROM_HERE, [weak, ssrc](){
@@ -1316,6 +1312,18 @@ public:
         assert(_peerConnection != nullptr);
 
         cricket::AudioOptions options;
+        if (_radioMode) {
+            options.echo_cancellation = false;
+            options.auto_gain_control = false;
+            options.noise_suppression = false;
+            options.highpass_filter = false;
+            options.stereo_swapping = false;
+            options.typing_detection = false;
+            options.experimental_agc = false;
+            options.experimental_ns = false;
+            options.residual_echo_detector = false;
+            options.tx_agc_limiter = false;
+        }
         rtc::scoped_refptr<webrtc::AudioSourceInterface> audioSource = _nativeFactory->CreateAudioSource(options);
         std::stringstream name;
         name << "audio";
