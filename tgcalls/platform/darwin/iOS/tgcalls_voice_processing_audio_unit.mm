@@ -415,13 +415,13 @@ bool VoiceProcessingAudioUnit::Uninitialize() {
 
 void VoiceProcessingAudioUnit::setIsMicrophoneMuted(bool isMuted) {
     isMicrophoneMuted_ = isMuted;
-    if (vpio_unit_ && state_ == kStarted) {
+    /*if (vpio_unit_ && state_ == kStarted) {
         UInt32 muteUplinkOutput = isMuted ? 1 : 0;
         OSStatus result = AudioUnitSetProperty(vpio_unit_, kAUVoiceIOProperty_MuteOutput, kAudioUnitScope_Global, kInputBus, &muteUplinkOutput, sizeof(muteUplinkOutput));
         if (result != noErr) {
             RTCLogError(@"Failed to set kAUVoiceIOProperty_MuteOutput. Error=%ld", (long)result);
         }
-    }
+    }*/
 }
 
 OSStatus VoiceProcessingAudioUnit::Render(AudioUnitRenderActionFlags* flags,
