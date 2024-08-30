@@ -1439,6 +1439,7 @@ public:
     _disableOutgoingAudioProcessing(descriptor.disableOutgoingAudioProcessing),
 #ifdef WEBRTC_IOS
     _disableAudioInput(descriptor.disableAudioInput),
+    _enableSystemMute(descriptor.ios_enableSystemMute),
 #endif
     _minOutgoingVideoBitrateKbit(descriptor.minOutgoingVideoBitrateKbit),
     _videoContentType(descriptor.videoContentType),
@@ -3387,10 +3388,11 @@ private:
         auto onMutedSpeechActivityDetected = _onMutedSpeechActivityDetected;
 #ifdef WEBRTC_IOS
         bool disableRecording = _disableAudioInput;
+        bool enableSystemMute = _enableSystemMute;
 #endif
         const auto create = [&](webrtc::AudioDeviceModule::AudioLayer layer) {
 #ifdef WEBRTC_IOS
-            auto result = rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, disableRecording, disableRecording ? 2 : 1);
+            auto result = rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, disableRecording, enableSystemMute, disableRecording ? 2 : 1);
             if (result) {
                 result->mutedSpeechDetectionChanged = ^(bool value) {
                     if (onMutedSpeechActivityDetected) {
@@ -3452,6 +3454,7 @@ private:
     bool _disableOutgoingAudioProcessing{false};
 #ifdef WEBRTC_IOS
     bool _disableAudioInput{false};
+    bool _enableSystemMute{false};
 #endif
     int _minOutgoingVideoBitrateKbit{100};
     VideoContentType _videoContentType{VideoContentType::None};

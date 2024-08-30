@@ -41,7 +41,7 @@
 namespace webrtc {
 
 webrtc::scoped_refptr<AudioDeviceModule> CreateAudioDeviceModule(bool bypass_voice_processing) {
-    return rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(bypass_voice_processing, false, 1);
+    return rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(bypass_voice_processing, false, false, 1);
 }
 
 webrtc::scoped_refptr<AudioDeviceModule> AudioDeviceModule::Create(
@@ -56,9 +56,10 @@ webrtc::scoped_refptr<AudioDeviceModule> AudioDeviceModule::Create(
 namespace webrtc {
 namespace tgcalls_ios_adm {
 
-AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing, bool disable_recording, int numChannels)
+AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing, bool disable_recording, bool enableSystemMute, int numChannels)
     : bypass_voice_processing_(bypass_voice_processing),
       disable_recording_(disable_recording),
+      enableSystemMute_(enableSystemMute),
       numChannels_(numChannels),
       task_queue_factory_(CreateDefaultTaskQueueFactory()) {
   RTC_LOG(LS_INFO) << "current platform is IOS";
@@ -91,7 +92,7 @@ AudioDeviceModuleIOS::AudioDeviceModuleIOS(bool bypass_voice_processing, bool di
       return 0;
 
     audio_device_buffer_.reset(new webrtc::AudioDeviceBuffer(task_queue_factory_.get()));
-    audio_device_.reset(new tgcalls_ios_adm::AudioDeviceIOS(bypass_voice_processing_, disable_recording_, numChannels_));
+    audio_device_.reset(new tgcalls_ios_adm::AudioDeviceIOS(bypass_voice_processing_, disable_recording_, enableSystemMute_, numChannels_));
     RTC_CHECK(audio_device_);
       
       if (audio_device_) {

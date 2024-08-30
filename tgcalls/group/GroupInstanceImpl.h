@@ -159,6 +159,7 @@ struct GroupInstanceDescriptor {
     int outgoingAudioBitrateKbit{32};
     bool disableOutgoingAudioProcessing{false};
     bool disableAudioInput{false};
+    bool ios_enableSystemMute{false};
     VideoContentType videoContentType{VideoContentType::None};
     bool initialEnableNoiseSuppression{false};
     std::vector<VideoCodecName> videoCodecPreferences;

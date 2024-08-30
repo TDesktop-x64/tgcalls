@@ -32,7 +32,7 @@ class AudioDeviceModuleIOS : public AudioDeviceModule {
  public:
   int32_t AttachAudioBuffer();
 
-  explicit AudioDeviceModuleIOS(bool bypass_voice_processing, bool disable_recording, int numChannels);
+  explicit AudioDeviceModuleIOS(bool bypass_voice_processing, bool disable_recording, bool enableSystemMute, int numChannels);
   ~AudioDeviceModuleIOS() override;
 
   // Retrieve the currently utilized audio layer
@@ -143,6 +143,7 @@ class AudioDeviceModuleIOS : public AudioDeviceModule {
  private:
   const bool bypass_voice_processing_;
   const bool disable_recording_;
+  const bool enableSystemMute_;
   const int numChannels_;
   bool initialized_ = false;
   bool internalIsPlaying_ = false;
