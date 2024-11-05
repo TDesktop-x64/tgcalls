@@ -1441,7 +1441,6 @@ public:
     _getVideoSource(descriptor.getVideoSource),
     _disableIncomingChannels(descriptor.disableIncomingChannels),
     _useDummyChannel(descriptor.useDummyChannel),
-    _outgoingAudioBitrateKbit(descriptor.outgoingAudioBitrateKbit),
     _disableOutgoingAudioProcessing(descriptor.disableOutgoingAudioProcessing),
 #ifdef WEBRTC_IOS
     _disableAudioInput(descriptor.disableAudioInput),
@@ -3516,7 +3515,6 @@ private:
     std::function<webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>()> _getVideoSource;
     bool _disableIncomingChannels = false;
     bool _useDummyChannel{true};
-    int _outgoingAudioBitrateKbit{32};
     bool _disableOutgoingAudioProcessing{false};
 #ifdef WEBRTC_IOS
     bool _disableAudioInput{false};
