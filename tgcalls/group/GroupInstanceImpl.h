@@ -166,6 +166,7 @@ struct GroupInstanceDescriptor {
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> requestMediaChannelDescriptions;
     int minOutgoingVideoBitrateKbit{100};
     std::function<void(bool)> onMutedSpeechActivityDetected;
+    std::optional<EncryptionKey> encryptionKey;
 };
 
 template <typename T>
