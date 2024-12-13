@@ -322,13 +322,15 @@ GroupNetworkManager::GroupNetworkManager(
     std::function<void(bool)> dataChannelStateUpdated,
     std::function<void(std::string const &)> dataChannelMessageReceived,
     std::function<void(uint32_t, uint8_t, bool)> audioActivityUpdated,
+    std::function<void(uint32_t)> anyActivityUpdated,
     std::shared_ptr<Threads> threads) :
 _threads(std::move(threads)),
 _stateUpdated(std::move(stateUpdated)),
 _unknownSsrcPacketReceived(std::move(unknownSsrcPacketReceived)),
 _dataChannelStateUpdated(dataChannelStateUpdated),
 _dataChannelMessageReceived(dataChannelMessageReceived),
-_audioActivityUpdated(audioActivityUpdated) {
+_audioActivityUpdated(audioActivityUpdated),
+_anyActivityUpdated(anyActivityUpdated) {
     assert(_threads->getNetworkThread()->IsCurrent());
 
     _localIceParameters = PeerIceParameters(rtc::CreateRandomString(cricket::ICE_UFRAG_LENGTH), rtc::CreateRandomString(cricket::ICE_PWD_LENGTH), false);
@@ -607,6 +609,10 @@ void GroupNetworkManager::RtpPacketReceived_n(webrtc::RtpPacketReceived const &p
                 _audioActivityUpdated(packet.Ssrc(), audioLevel, isSpeech);
             }
         }
+    }
+    
+    if (_anyActivityUpdated) {
+        _anyActivityUpdated(packet.Ssrc());
     }
 
     if (isUnresolved && _unknownSsrcPacketReceived) {

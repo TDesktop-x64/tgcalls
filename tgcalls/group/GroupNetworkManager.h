@@ -63,6 +63,7 @@ public:
         std::function<void(bool)> dataChannelStateUpdated,
         std::function<void(std::string const &)> dataChannelMessageReceived,
         std::function<void(uint32_t, uint8_t, bool)> audioActivityUpdated,
+        std::function<void(uint32_t)> anyActivityUpdated,
         std::shared_ptr<Threads> threads);
     ~GroupNetworkManager();
 
@@ -103,6 +104,7 @@ private:
     std::function<void(bool)> _dataChannelStateUpdated;
     std::function<void(std::string const &)> _dataChannelMessageReceived;
     std::function<void(uint32_t, uint8_t, bool)> _audioActivityUpdated;
+    std::function<void(uint32_t)> _anyActivityUpdated;
 
     std::unique_ptr<rtc::NetworkMonitorFactory> _networkMonitorFactory;
     std::unique_ptr<rtc::BasicPacketSocketFactory> _socketFactory;

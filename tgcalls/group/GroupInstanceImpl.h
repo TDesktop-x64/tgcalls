@@ -49,6 +49,15 @@ struct GroupLevelsUpdate {
     std::vector<GroupLevelUpdate> updates;
 };
 
+struct GroupActivityUpdate {
+    uint32_t ssrc = 0;
+};
+
+struct GroupActivitiesUpdate {
+    std::vector<GroupActivityUpdate> updates;
+};
+
+
 class BroadcastPartTask {
 public:
     virtual ~BroadcastPartTask() = default;
@@ -143,9 +152,12 @@ struct GroupInstanceStats {
 struct GroupInstanceDescriptor {
     std::shared_ptr<Threads> threads;
     GroupConfig config;
+    std::string statsLogPath;
     std::function<void(GroupNetworkState)> networkStateUpdated;
+    std::function<void(int)> signalBarsUpdated;
     std::function<void(GroupLevelsUpdate const &)> audioLevelsUpdated;
     std::function<void(uint32_t, const AudioFrame &)> onAudioFrame;
+    std::function<void(GroupActivitiesUpdate const &)> ssrcActivityUpdated;
     std::string initialInputDeviceId;
     std::string initialOutputDeviceId;
     bool useDummyChannel{true};
@@ -167,6 +179,7 @@ struct GroupInstanceDescriptor {
     int minOutgoingVideoBitrateKbit{100};
     std::function<void(bool)> onMutedSpeechActivityDetected;
     std::optional<EncryptionKey> encryptionKey;
+    bool isConference{false};
 };
 
 template <typename T>
@@ -179,7 +192,7 @@ protected:
 public:
     virtual ~GroupInstanceInterface() = default;
 
-    virtual void stop() = 0;
+    virtual void stop(std::function<void()> completion) = 0;
 
     virtual void setConnectionMode(GroupConnectionMode connectionMode, bool keepBroadcastIfWasEnabled, bool isUnifiedBroadcast) = 0;
 

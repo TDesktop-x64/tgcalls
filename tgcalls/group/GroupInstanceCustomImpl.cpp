@@ -383,6 +383,10 @@ struct InternalGroupLevelValue {
     int64_t timestamp = 0;
 };
 
+struct InternalGroupActivityValue {
+    int64_t timestamp = 0;
+};
+
 struct ChannelId {
   uint32_t networkSsrc = 0;
   uint32_t actualSsrc = 0;
@@ -1703,14 +1707,48 @@ public:
     }
 };
 
+template<typename T>
+struct StateLogRecord {
+    int64_t timestamp = 0;
+    T record;
+
+    explicit StateLogRecord(int32_t timestamp_, T &&record_) :
+    timestamp(timestamp_),
+    record(std::move(record_)) {
+    }
+};
+
+struct NetworkStateLogRecord {
+    bool isConnected = false;
+    bool isFailed = false;
+
+    bool operator==(NetworkStateLogRecord const &rhs) const {
+        if (isConnected != rhs.isConnected) {
+            return false;
+        }
+        if (isFailed != rhs.isFailed) {
+            return false;
+        }
+
+        return true;
+    }
+};
+
+struct NetworkBitrateLogRecord {
+    int32_t bitrate = 0;
+};
+
 } // namespace
 
 class GroupInstanceCustomInternal : public sigslot::has_slots<>, public std::enable_shared_from_this<GroupInstanceCustomInternal> {
 public:
     GroupInstanceCustomInternal(GroupInstanceDescriptor &&descriptor, std::shared_ptr<Threads> threads) :
     _threads(std::move(threads)),
+    _statsLogPath(descriptor.statsLogPath),
     _networkStateUpdated(descriptor.networkStateUpdated),
+    _signalBarsUpdated(descriptor.signalBarsUpdated),
     _audioLevelsUpdated(descriptor.audioLevelsUpdated),
+    _activitiesUpdated(descriptor.ssrcActivityUpdated),
     _onAudioFrame(descriptor.onAudioFrame),
     _requestMediaChannelDescriptions(descriptor.requestMediaChannelDescriptions),
     _requestCurrentTime(descriptor.requestCurrentTime),
@@ -1727,6 +1765,7 @@ public:
     _disableAudioInput(descriptor.disableAudioInput),
     _enableSystemMute(descriptor.ios_enableSystemMute),
 #endif
+    _isConference(descriptor.isConference),
     _minOutgoingVideoBitrateKbit(descriptor.minOutgoingVideoBitrateKbit),
     _videoContentType(descriptor.videoContentType),
     _videoCodecPreferences(std::move(descriptor.videoCodecPreferences)),
@@ -1783,6 +1822,8 @@ public:
     }
 
     void start() {
+        _startTimestamp = rtc::TimeMillis();
+        
         const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
 
         webrtc::field_trial::InitFieldTrialsFromString(
@@ -1832,6 +1873,13 @@ public:
                     threads->getMediaThread()->PostTask([weak, ssrc, audioLevel, isSpeech]() {
                         if (const auto strong = weak.lock()) {
                             strong->updateSsrcAudioLevel(ssrc, audioLevel, isSpeech);
+                        }
+                    });
+                },
+                [=](uint32_t ssrc) {
+                    threads->getMediaThread()->PostTask([weak, ssrc]() {
+                        if (const auto strong = weak.lock()) {
+                            strong->updateSsrcActivity(ssrc);
                         }
                     });
                 }, threads);
@@ -1961,11 +2009,64 @@ public:
         }*/
 
         beginNetworkStatusTimer(0);
+        beginLogTimer(0);
         //beginAudioChannelCleanupTimer(0);
 
         adjustBitratePreferences(true);
 
         beginRemoteConstraintsUpdateTimer(5000);
+    }
+    
+    void beginLogTimer(int delayMs) {
+        const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
+        _threads->getMediaThread()->PostDelayedTask([weak]() {
+            auto strong = weak.lock();
+            if (!strong) {
+                return;
+            }
+
+            strong->writeStateLogRecords();
+
+            strong->beginLogTimer(1000);
+        }, webrtc::TimeDelta::Millis(delayMs));
+    }
+
+    void writeStateLogRecords() {
+        const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
+        _threads->getWorkerThread()->PostTask([weak]() {
+            auto strong = weak.lock();
+            if (!strong) {
+                return;
+            }
+
+            auto stats = strong->_call->GetStats();
+            float sendBitrateKbps = ((float)stats.send_bandwidth_bps / 1000.0f);
+
+            strong->_threads->getMediaThread()->PostTask([weak, sendBitrateKbps]() {
+                auto strong = weak.lock();
+                if (!strong) {
+                    return;
+                }
+
+                float bitrateNorm = 16.0f;
+                if (strong->_outgoingVideoChannel) {
+                    bitrateNorm = 600.0f;
+                }
+
+                float signalBarsNorm = 4.0f;
+                float adjustedQuality = sendBitrateKbps / bitrateNorm;
+                adjustedQuality = fmaxf(0.0f, adjustedQuality);
+                adjustedQuality = fminf(1.0f, adjustedQuality);
+                if (strong->_signalBarsUpdated) {
+                    strong->_signalBarsUpdated((int)(adjustedQuality * signalBarsNorm));
+                }
+
+                NetworkBitrateLogRecord networkBitrateLogRecord;
+                networkBitrateLogRecord.bitrate = (int32_t)sendBitrateKbps;
+
+                strong->_networkBitrateLogRecords.emplace_back(rtc::TimeMillis(), std::move(networkBitrateLogRecord));
+            });
+        });
     }
 
     void destroyOutgoingVideoChannel() {
@@ -2287,6 +2388,54 @@ public:
         _networkManager->perform([](GroupNetworkManager *networkManager) {
             networkManager->stop();
         });
+        
+        json11::Json::object statsLog;
+
+        for (int i = (int)_networkStateLogRecords.size() - 1; i >= 1; i--) {
+            // coalesce events within 5ms
+            if (_networkStateLogRecords[i].timestamp - _networkStateLogRecords[i - 1].timestamp < 5) {
+                _networkStateLogRecords.erase(_networkStateLogRecords.begin() + i - 1);
+            }
+        }
+
+        json11::Json::array jsonNetworkStateLogRecords;
+        int64_t baseTimestamp = 0;
+        for (const auto &record : _networkStateLogRecords) {
+            json11::Json::object jsonRecord;
+
+            if (baseTimestamp == 0) {
+                baseTimestamp = record.timestamp;
+            }
+            jsonRecord.insert(std::make_pair("t", json11::Json(std::to_string(record.timestamp - baseTimestamp))));
+            jsonRecord.insert(std::make_pair("c", json11::Json(record.record.isConnected ? 1 : 0)));
+            if (record.record.isFailed) {
+                jsonRecord.insert(std::make_pair("failed", json11::Json(1)));
+            }
+
+            jsonNetworkStateLogRecords.push_back(std::move(jsonRecord));
+        }
+        statsLog.insert(std::make_pair("network", std::move(jsonNetworkStateLogRecords)));
+
+        json11::Json::array jsonNetworkBitrateLogRecords;
+        for (const auto &record : _networkBitrateLogRecords) {
+            json11::Json::object jsonRecord;
+
+            jsonRecord.insert(std::make_pair("b", json11::Json(record.record.bitrate)));
+
+            jsonNetworkBitrateLogRecords.push_back(std::move(jsonRecord));
+        }
+        statsLog.insert(std::make_pair("bitrate", std::move(jsonNetworkBitrateLogRecords)));
+
+        auto jsonStatsLog = json11::Json(std::move(statsLog));
+
+        if (!_statsLogPath.empty()) {
+            std::ofstream file;
+            file.open(_statsLogPath);
+
+            file << jsonStatsLog.dump();
+
+            file.close();
+        }
     }
 
     void updateSsrcAudioLevel(uint32_t ssrc, uint8_t audioLevel, bool isSpeech) {
@@ -2319,6 +2468,17 @@ public:
             audioChannel->second->updateActivity();
         }
     }
+    
+    void updateSsrcActivity(uint32_t ssrc) {
+        auto it = _ssrcActivities.find(ChannelId(ssrc));
+        if (it != _ssrcActivities.end()) {
+            it->second.timestamp = rtc::TimeMillis();
+        } else {
+            InternalGroupActivityValue updated;
+            updated.timestamp = rtc::TimeMillis();
+            _ssrcActivities.insert(std::make_pair(ChannelId(ssrc), std::move(updated)));
+        }
+    }
 
     void beginLevelsTimer(int timeoutMs) {
         const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
@@ -2334,13 +2494,6 @@ public:
             GroupLevelsUpdate levelsUpdate;
             levelsUpdate.updates.reserve(strong->_audioLevels.size() + 1);
             for (auto &it : strong->_audioLevels) {
-                /*if (it.second.value.level < 0.001f) {
-                    continue;
-                }
-                if (it.second.timestamp <= timestamp - maxSampleTimeout) {
-                    continue;
-                }*/
-
                 uint32_t effectiveSsrc = it.first.actualSsrc;
                 if (std::find_if(levelsUpdate.updates.begin(), levelsUpdate.updates.end(), [&](GroupLevelUpdate const &item) {
                     return item.ssrc == effectiveSsrc;
@@ -2357,19 +2510,33 @@ public:
                         audioChannel->second->updateActivity();
                     }
                 }
-
-                //it.second.value.level *= 0.5f;
-                //it.second.value.voice = false;
             }
-
             strong->_audioLevels.clear();
 
             auto myAudioLevel = strong->_myAudioLevel;
             myAudioLevel.isMuted = strong->_isMuted;
             levelsUpdate.updates.push_back(GroupLevelUpdate{ 0, myAudioLevel });
+            
+            GroupActivitiesUpdate activitiesUpdate;
+            activitiesUpdate.updates.reserve(strong->_ssrcActivities.size());
+            for (auto &it : strong->_ssrcActivities) {
+                uint32_t effectiveSsrc = it.first.actualSsrc;
+                if (std::find_if(activitiesUpdate.updates.begin(), activitiesUpdate.updates.end(), [&](GroupActivityUpdate const &item) {
+                    return item.ssrc == effectiveSsrc;
+                }) != activitiesUpdate.updates.end()) {
+                    continue;
+                }
+                activitiesUpdate.updates.push_back(GroupActivityUpdate{
+                    effectiveSsrc
+                });
+            }
+            strong->_ssrcActivities.clear();
 
             if (strong->_audioLevelsUpdated) {
                 strong->_audioLevelsUpdated(levelsUpdate);
+            }
+            if (strong->_activitiesUpdated) {
+                strong->_activitiesUpdated(activitiesUpdate);
             }
 
             bool isSpeech = myAudioLevel.voice && !myAudioLevel.isMuted;
@@ -2676,6 +2843,21 @@ public:
             if (_networkStateUpdated) {
                 _networkStateUpdated(_effectiveNetworkState);
             }
+        }
+        
+        NetworkStateLogRecord record;
+        record.isConnected = effectiveNetworkState.isConnected;
+        record.isFailed = false;
+        
+        if (effectiveNetworkState.isConnected && !_hasBeenConnected) {
+            _hasBeenConnected = true;
+            auto connectionTimeMs = rtc::TimeMillis() - _startTimestamp;
+            RTC_LOG(LS_INFO) << "Connected in " << connectionTimeMs << " ms";
+        }
+
+        if (!_currentNetworkStateLogRecord || !(_currentNetworkStateLogRecord.value() == record)) {
+            _currentNetworkStateLogRecord = record;
+            _networkStateLogRecords.emplace_back(rtc::TimeMillis(), std::move(record));
         }
     }
 
@@ -3089,7 +3271,9 @@ public:
 
         uint32_t outgoingVideoSsrcBase = _outgoingAudioSsrc + 1;
         int numVideoSimulcastLayers = 3;
-        if (_videoContentType == VideoContentType::Screencast) {
+        if (_isConference) {
+            numVideoSimulcastLayers = 1;
+        } else if (_videoContentType == VideoContentType::Screencast) {
             numVideoSimulcastLayers = 2;
         }
         _outgoingVideoSsrcs.simulcastLayers.clear();
@@ -3739,8 +3923,11 @@ private:
     GroupConnectionMode _connectionMode = GroupConnectionMode::GroupConnectionModeNone;
     bool _isUnifiedBroadcast = false;
 
+    std::string _statsLogPath;
     std::function<void(GroupNetworkState)> _networkStateUpdated;
+    std::function<void(int)> _signalBarsUpdated;
     std::function<void(GroupLevelsUpdate const &)> _audioLevelsUpdated;
+    std::function<void(GroupActivitiesUpdate const &)> _activitiesUpdated;
     std::function<void(uint32_t, const AudioFrame &)> _onAudioFrame;
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> _requestMediaChannelDescriptions;
     std::function<std::shared_ptr<BroadcastPartTask>(std::function<void(int64_t)>)> _requestCurrentTime;
@@ -3757,6 +3944,7 @@ private:
     bool _disableAudioInput{false};
     bool _enableSystemMute{false};
 #endif
+    bool _isConference{false};
     int _minOutgoingVideoBitrateKbit{100};
     VideoContentType _videoContentType{VideoContentType::None};
     std::vector<VideoCodecName> _videoCodecPreferences;
@@ -3804,6 +3992,8 @@ private:
 
     std::map<ChannelId, InternalGroupLevelValue> _audioLevels;
     GroupLevelValue _myAudioLevel;
+    
+    std::map<ChannelId, InternalGroupActivityValue> _ssrcActivities;
 
     bool _isMuted = true;
     std::shared_ptr<NoiseSuppressionConfiguration> _noiseSuppressionConfiguration;
@@ -3830,6 +4020,13 @@ private:
     absl::optional<int64_t> _broadcastEnabledUntilRtcIsConnectedAtTimestamp;
     bool _isDataChannelOpen = false;
     GroupNetworkState _effectiveNetworkState;
+    
+    int64_t _startTimestamp = 0;
+    bool _hasBeenConnected = false;
+
+    absl::optional<NetworkStateLogRecord> _currentNetworkStateLogRecord;
+    std::vector<StateLogRecord<NetworkStateLogRecord>> _networkStateLogRecords;
+    std::vector<StateLogRecord<NetworkBitrateLogRecord>> _networkBitrateLogRecords;
 
     std::shared_ptr<StreamingMediaContext> _streamingContext;
 
@@ -3870,9 +4067,12 @@ GroupInstanceCustomImpl::~GroupInstanceCustomImpl() {
     _threads->getMediaThread()->BlockingCall([] {});
 }
 
-void GroupInstanceCustomImpl::stop() {
-    _internal->perform([](GroupInstanceCustomInternal *internal) {
+void GroupInstanceCustomImpl::stop(std::function<void()> completion) {
+    _internal->perform([completion](GroupInstanceCustomInternal *internal) {
         internal->stop();
+        if (completion) {
+            completion();
+        }
     });
 }
 

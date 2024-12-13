@@ -21,7 +21,7 @@ public:
     explicit GroupInstanceCustomImpl(GroupInstanceDescriptor &&descriptor);
     ~GroupInstanceCustomImpl();
 
-    void stop();
+    void stop(std::function<void()> completion);
     
     void setConnectionMode(GroupConnectionMode connectionMode, bool keepBroadcastIfWasEnabled, bool isUnifiedBroadcast);
 
