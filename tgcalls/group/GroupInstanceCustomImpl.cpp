@@ -929,7 +929,7 @@ public:
     FrameDecryptorImpl(EncryptionKey const &encryptionKey) {
         _connection = std::make_unique<EncryptedConnection>(
             EncryptedConnection::Type::Transport,
-            encryptionKey,
+            EncryptionKey(encryptionKey.value, false),
             [](int, int) {
             }
         );
@@ -1107,7 +1107,7 @@ public:
     FrameEncryptorImpl(EncryptionKey const &encryptionKey) {
         _connection = std::make_unique<EncryptedConnection>(
             EncryptedConnection::Type::Transport,
-            encryptionKey,
+            EncryptionKey(encryptionKey.value, true),
             [](int, int) {
             }
         );
