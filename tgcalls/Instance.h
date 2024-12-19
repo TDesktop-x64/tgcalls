@@ -130,9 +130,9 @@ struct EncryptionKey {
 	bool isOutgoing = false;
 
     EncryptionKey(
-		std::shared_ptr<std::array<uint8_t, kSize>> value,
+		std::shared_ptr<const std::array<uint8_t, kSize>> const value,
 		bool isOutgoing)
-	: value(std::move(value)), isOutgoing(isOutgoing) {
+	: value(value), isOutgoing(isOutgoing) {
     }
 };
 

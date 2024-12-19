@@ -52,7 +52,7 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
                        public AudioSessionObserver,
                        public VoiceProcessingAudioUnitObserver {
  public:
-  explicit AudioDeviceIOS(bool bypass_voice_processing, bool disable_recording, int numChannels);
+  explicit AudioDeviceIOS(bool bypass_voice_processing, bool disable_recording, bool enableSystemMute, int numChannels);
   ~AudioDeviceIOS() override;
 
   void AttachAudioBuffer(AudioDeviceBuffer* audioBuffer) override;
@@ -223,6 +223,7 @@ class AudioDeviceIOS : public AudioDeviceGeneric,
   const bool bypass_voice_processing_;
                            
   const bool disable_recording_;
+  const bool enableSystemMute_ = false;
   const int numChannels_;
 
   // Native I/O audio thread checker.

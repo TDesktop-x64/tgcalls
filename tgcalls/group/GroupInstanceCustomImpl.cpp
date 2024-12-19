@@ -78,6 +78,9 @@
 
 #include "third-party/json11.hpp"
 
+#include "common_video/h264/h264_common.h"
+#include "common_video/h264/h264_bitstream_parser.h"
+
 namespace tgcalls {
 
 namespace {
@@ -377,6 +380,10 @@ struct VideoSsrcs {
 
 struct InternalGroupLevelValue {
     GroupLevelValue value;
+    int64_t timestamp = 0;
+};
+
+struct InternalGroupActivityValue {
     int64_t timestamp = 0;
 };
 
@@ -917,6 +924,271 @@ private:
     std::vector<int16_t> _samples;
 };
 
+class FrameDecryptorImpl : public webrtc::FrameDecryptorInterface {
+public:
+    FrameDecryptorImpl(EncryptionKey const &encryptionKey) {
+        _connection = std::make_unique<EncryptedConnection>(
+            EncryptedConnection::Type::Transport,
+            EncryptionKey(encryptionKey.value, false),
+            [](int, int) {
+            }
+        );
+    }
+    
+    virtual ~FrameDecryptorImpl() override {
+    }
+    
+public:
+    virtual Result Decrypt(
+        cricket::MediaType media_type,
+        const std::vector<uint32_t>& csrcs,
+        rtc::ArrayView<const uint8_t> additional_data,
+        rtc::ArrayView<const uint8_t> encrypted_frame,
+        rtc::ArrayView<uint8_t> frame
+    ) override {
+        if (media_type == cricket::MediaType::MEDIA_TYPE_VIDEO) {
+            if (encrypted_frame.size() < 4) {
+                return Result(Status::kFailedToDecrypt, 0);
+            }
+            uint32_t plaintextHeaderSize = 0;
+            memcpy(&plaintextHeaderSize, encrypted_frame.begin() + (encrypted_frame.size() - 4), 4);
+            
+            if (plaintextHeaderSize > encrypted_frame.size() - 4) {
+                return Result(Status::kFailedToDecrypt, 0);
+            }
+            
+            std::copy(encrypted_frame.begin(), encrypted_frame.begin() + plaintextHeaderSize, frame.begin());
+            
+            if (encrypted_frame.size() > 4 + plaintextHeaderSize) {
+                rtc::CopyOnWriteBuffer buffer(encrypted_frame.size() - 4 - plaintextHeaderSize);
+                std::copy(encrypted_frame.begin() + plaintextHeaderSize, encrypted_frame.begin() + plaintextHeaderSize + (encrypted_frame.size() - 4 - plaintextHeaderSize), buffer.MutableData());
+                auto result = _connection->decryptRawPacket(buffer);
+                if (result) {
+                    std::copy(result->data(), result->data() + result->size(), frame.begin() + plaintextHeaderSize);
+                    return Result(Status::kOk, plaintextHeaderSize + result->size());
+                } else {
+                    return Result(Status::kFailedToDecrypt, 0);
+                }
+            } else {
+                return Result(Status::kOk, plaintextHeaderSize);
+            }
+        } else {
+            rtc::CopyOnWriteBuffer buffer(encrypted_frame.size());
+            std::copy(encrypted_frame.begin(), encrypted_frame.end(), buffer.MutableData());
+            auto result = _connection->decryptRawPacket(buffer);
+            if (result) {
+                std::copy(result->data(), result->data() + result->size(), frame.begin());
+                return Result(Status::kOk, result->size());
+            } else {
+                return Result(Status::kFailedToDecrypt, 0);
+            }
+        }
+    }
+
+    virtual size_t GetMaxPlaintextByteSize(
+        cricket::MediaType media_type,
+        size_t encrypted_frame_size
+    ) override {
+        return encrypted_frame_size;
+    }
+    
+private:
+    std::unique_ptr<EncryptedConnection> _connection;
+};
+
+static constexpr uint8_t kTypeMask = 0x1F;
+static constexpr uint8_t kFuA = 28;
+static constexpr uint8_t kIdr = 5;
+static constexpr uint8_t kSps = 7;
+static constexpr uint8_t kPps = 8;
+static constexpr uint8_t kSei = 6;
+static constexpr uint8_t kStapA = 24;
+static constexpr size_t kNalHeaderSize = 1;
+static constexpr size_t kStapAHeaderSize = 3;
+static constexpr size_t kFuAHeaderSize = 2;
+
+// Verifies that all NAL units in a STAP-A are properly sized and fit within `naluLength`.
+bool verifyStapANaluLengths(const uint8_t* buf, size_t naluStart, size_t naluLength) {
+    size_t pos = 0;
+    while (pos + 2 <= naluLength) {
+        // Read 2-byte NAL size
+        uint16_t nalu_size = (static_cast<uint16_t>(buf[naluStart + pos]) << 8) |
+                              static_cast<uint16_t>(buf[naluStart + pos + 1]);
+        pos += 2;
+
+        // Check if nalu_size fits in remaining length
+        if (pos + nalu_size > naluLength) {
+            return false;
+        }
+
+        pos += nalu_size;
+    }
+
+    // pos should match exactly naluLength after parsing all NALUs
+    return (pos == naluLength);
+}
+
+static bool parseFuaNaluForKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
+    if (len < kFuAHeaderSize) {
+        return false;
+    }
+    // FU-A header is at buf[off+1]
+    uint8_t fuNalType = buf[off + 1] & kTypeMask;
+    maxOffset = std::max(maxOffset, off + 1 + 1);
+    return (fuNalType == kIdr);
+}
+
+static bool parseSingleNaluForKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
+    if (len < kNalHeaderSize) {
+        return false;
+    }
+
+    int nalType = buf[off] & kTypeMask;
+    size_t naluStart = off + kNalHeaderSize;
+    size_t naluLength = len - kNalHeaderSize;
+
+    if (nalType == kStapA) {
+        // Check STAP-A header size
+        if (len <= kStapAHeaderSize) {
+            std::cerr << "StapA header truncated." << std::endl;
+            return false;
+        }
+        // Verify STAP-A NAL lengths
+        if (!verifyStapANaluLengths(buf, naluStart, naluLength)) {
+            std::cerr << "StapA packet with incorrect NALU packet lengths." << std::endl;
+            return false;
+        }
+        // After verifying, the first NAL in STAP-A starts at off + kStapAHeaderSize.
+        nalType = buf[off + kStapAHeaderSize] & kTypeMask;
+        maxOffset = std::max(maxOffset, off + kStapAHeaderSize + 1);
+    } else {
+        maxOffset = std::max(maxOffset, off + 1);
+    }
+
+    // Key frames are IDR, SPS, PPS, or SEI NAL units.
+    return (nalType == kIdr || nalType == kSps || nalType == kPps || nalType == kSei);
+}
+
+bool isKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
+    // Basic checks
+    if (!buf || len == 0) {
+        return false;
+    }
+
+    // Ensure we can safely access buf[off]
+    // (Assuming caller guarantees off + len is within buffer)
+    if (len < 1) {
+        return false;
+    }
+
+    int nalType = buf[off] & kTypeMask;
+
+    // Check if FU-A
+    if (nalType == kFuA) {
+        return parseFuaNaluForKeyFrame(buf, off, len, maxOffset);
+    } else {
+        return parseSingleNaluForKeyFrame(buf, off, len, maxOffset);
+    }
+}
+
+uint32_t calculateVideoFramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
+    size_t maxOffset = 0;
+    
+    std::vector<webrtc::H264::NaluIndex> naluIndices = webrtc::H264::FindNaluIndices(frame.data(), frame.size());
+    for (const webrtc::H264::NaluIndex &index : naluIndices) {
+        isKeyFrame(frame.begin(), index.payload_start_offset, index.payload_size, maxOffset);
+    }
+    
+    return (uint32_t)maxOffset;
+}
+
+class FrameEncryptorImpl : public webrtc::FrameEncryptorInterface {
+public:
+    FrameEncryptorImpl(EncryptionKey const &encryptionKey) {
+        _connection = std::make_unique<EncryptedConnection>(
+            EncryptedConnection::Type::Transport,
+            EncryptionKey(encryptionKey.value, true),
+            [](int, int) {
+            }
+        );
+    }
+    
+    virtual ~FrameEncryptorImpl() override {
+    }
+    
+    virtual int Encrypt(
+        cricket::MediaType media_type,
+        uint32_t ssrc,
+        rtc::ArrayView<const uint8_t> additional_data,
+        rtc::ArrayView<const uint8_t> frame,
+        rtc::ArrayView<uint8_t> encrypted_frame,
+        size_t *bytes_written
+    ) override {
+        if (media_type == cricket::MediaType::MEDIA_TYPE_VIDEO) {
+            uint32_t plaintextHeaderSize = calculateVideoFramePlaintextHeaderSize(frame);
+            if (plaintextHeaderSize > (uint32_t)frame.size()) {
+                plaintextHeaderSize = (uint32_t)frame.size();
+            }
+            
+            if (plaintextHeaderSize >= (uint32_t)frame.size()) {
+                rtc::CopyOnWriteBuffer buffer(frame.size() + 4);
+                std::copy(frame.begin(), frame.begin() + plaintextHeaderSize, buffer.MutableData());
+                memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
+                
+                std::copy(buffer.data(), buffer.data() + buffer.size(), encrypted_frame.begin());
+                if (bytes_written) {
+                    *bytes_written = buffer.size();
+                }
+                return 0;
+            } else {
+                rtc::CopyOnWriteBuffer encryptedBuffer(frame.size() - plaintextHeaderSize);
+                std::copy(frame.begin() + plaintextHeaderSize, frame.end(), encryptedBuffer.MutableData());
+                auto result = _connection->encryptRawPacket(encryptedBuffer);
+                if (result) {
+                    rtc::CopyOnWriteBuffer buffer(plaintextHeaderSize + result->size() + 4);
+                    
+                    std::copy(frame.begin(), frame.begin() + plaintextHeaderSize, buffer.MutableData());
+                    std::copy(result->data(), result->data() + result->size(), buffer.MutableData() + plaintextHeaderSize);
+                    memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
+                    std::copy(buffer.data(), buffer.data() + buffer.size(), encrypted_frame.begin());
+                    
+                    if (bytes_written) {
+                        *bytes_written = buffer.size();
+                    }
+                    return 0;
+                } else {
+                    return 1;
+                }
+            }
+        } else {
+            rtc::CopyOnWriteBuffer buffer(frame.size());
+            std::copy(frame.begin(), frame.end(), buffer.MutableData());
+            auto result = _connection->encryptRawPacket(buffer);
+            if (result) {
+                std::copy(result->data(), result->data() + result->size(), encrypted_frame.begin());
+                if (bytes_written) {
+                    *bytes_written = result->size();
+                }
+                return 0;
+            } else {
+                return 1;
+            }
+            
+            return 0;
+        }
+    }
+
+    virtual size_t GetMaxCiphertextByteSize(
+        cricket::MediaType media_type,
+        size_t frame_size
+    ) override {
+        return frame_size + 64;
+    }
+    
+private:
+    std::unique_ptr<EncryptedConnection> _connection;
+};
+
 class IncomingAudioChannel : public sigslot::has_slots<> {
 public:
     IncomingAudioChannel(
@@ -928,14 +1200,15 @@ public:
         ChannelId ssrc,
         std::function<void(AudioSinkImpl::Update)> &&onAudioLevelUpdated,
         std::function<void(uint32_t, const AudioFrame &)> onAudioFrame,
-        std::shared_ptr<Threads> threads) :
+        std::shared_ptr<Threads> threads,
+        std::optional<EncryptionKey> const &encryptionKey) :
     _threads(threads),
     _ssrc(ssrc),
     _channelManager(channelManager),
     _call(call) {
         _creationTimestamp = rtc::TimeMillis();
 
-        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm]() mutable {
+        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, encryptionKey]() mutable {
             cricket::AudioOptions audioOptions;
             audioOptions.audio_jitter_buffer_fast_accelerate = true;
             audioOptions.audio_jitter_buffer_min_delay_ms = 50;
@@ -990,6 +1263,10 @@ public:
 
             outgoingAudioDescription.reset();
             incomingAudioDescription.reset();
+            
+            if (encryptionKey) {
+                _audioChannel->receive_channel()->SetFrameDecryptor(_ssrc.networkSsrc, rtc::make_ref_counted<FrameDecryptorImpl>(encryptionKey.value()));
+            }
 
             if (_ssrc.actualSsrc != 1) {
                 std::unique_ptr<AudioSinkImpl> audioLevelSink(new AudioSinkImpl(std::move(onAudioLevelUpdated), _ssrc, std::move(onAudioFrame)));
@@ -1054,7 +1331,8 @@ public:
         VideoChannelDescription::Quality minQuality,
         VideoChannelDescription::Quality maxQuality,
         GroupParticipantVideoInformation const &description,
-        std::shared_ptr<Threads> threads) :
+        std::shared_ptr<Threads> threads,
+        std::optional<EncryptionKey> const &encryptionKey) :
     _threads(threads),
     _endpointId(description.endpointId),
     _channelManager(channelManager),
@@ -1063,7 +1341,7 @@ public:
     _requestedMaxQuality(maxQuality) {
         _videoSink.reset(new VideoSinkImpl(_endpointId));
 
-        _threads->getWorkerThread()->BlockingCall([this, rtpTransport, &availableVideoFormats, &description, randomIdGenerator]() mutable {
+        _threads->getWorkerThread()->BlockingCall([this, rtpTransport, &availableVideoFormats, &description, randomIdGenerator, encryptionKey]() mutable {
             uint32_t mid = randomIdGenerator->GenerateId();
             std::string streamId = std::string("video") + uint32ToString(mid);
 
@@ -1079,6 +1357,7 @@ public:
             }
 
             auto outgoingVideoDescription = std::make_unique<cricket::VideoContentDescription>();
+            outgoingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kAudioLevelUri, 1));
             outgoingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTimeUri, 2));
             outgoingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kTransportSequenceNumberUri, 3));
             outgoingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kVideoRotationUri, 13));
@@ -1119,6 +1398,7 @@ public:
             videoRecvStreamParams.set_stream_ids({ streamId });
 
             auto incomingVideoDescription = std::make_unique<cricket::VideoContentDescription>();
+            incomingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kAudioLevelUri, 1));
             incomingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTimeUri, 2));
             incomingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kTransportSequenceNumberUri, 3));
             incomingVideoDescription->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kVideoRotationUri, 13));
@@ -1141,6 +1421,16 @@ public:
             _videoChannel->SetRemoteContent(incomingVideoDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _videoChannel->SetPayloadTypeDemuxingEnabled(false);
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
+            
+            if (encryptionKey) {
+                for (const auto &group : description.ssrcGroups) {
+                    if (group.semantics == "SIM") {
+                        for (uint32_t ssrc : group.ssrcs) {
+                            _videoChannel->receive_channel()->SetFrameDecryptor(ssrc, rtc::make_ref_counted<FrameDecryptorImpl>(encryptionKey.value()));
+                        }
+                    }
+                }
+            }
         });
 
         _videoChannel->Enable(true);
@@ -1417,14 +1707,48 @@ public:
     }
 };
 
+template<typename T>
+struct StateLogRecord {
+    int64_t timestamp = 0;
+    T record;
+
+    explicit StateLogRecord(int32_t timestamp_, T &&record_) :
+    timestamp(timestamp_),
+    record(std::move(record_)) {
+    }
+};
+
+struct NetworkStateLogRecord {
+    bool isConnected = false;
+    bool isFailed = false;
+
+    bool operator==(NetworkStateLogRecord const &rhs) const {
+        if (isConnected != rhs.isConnected) {
+            return false;
+        }
+        if (isFailed != rhs.isFailed) {
+            return false;
+        }
+
+        return true;
+    }
+};
+
+struct NetworkBitrateLogRecord {
+    int32_t bitrate = 0;
+};
+
 } // namespace
 
 class GroupInstanceCustomInternal : public sigslot::has_slots<>, public std::enable_shared_from_this<GroupInstanceCustomInternal> {
 public:
     GroupInstanceCustomInternal(GroupInstanceDescriptor &&descriptor, std::shared_ptr<Threads> threads) :
     _threads(std::move(threads)),
+    _statsLogPath(descriptor.statsLogPath),
     _networkStateUpdated(descriptor.networkStateUpdated),
+    _signalBarsUpdated(descriptor.signalBarsUpdated),
     _audioLevelsUpdated(descriptor.audioLevelsUpdated),
+    _activitiesUpdated(descriptor.ssrcActivityUpdated),
     _onAudioFrame(descriptor.onAudioFrame),
     _requestMediaChannelDescriptions(descriptor.requestMediaChannelDescriptions),
     _requestCurrentTime(descriptor.requestCurrentTime),
@@ -1439,10 +1763,13 @@ public:
     _disableOutgoingAudioProcessing(descriptor.disableOutgoingAudioProcessing),
 #ifdef WEBRTC_IOS
     _disableAudioInput(descriptor.disableAudioInput),
+    _enableSystemMute(descriptor.ios_enableSystemMute),
 #endif
+    _isConference(descriptor.isConference),
     _minOutgoingVideoBitrateKbit(descriptor.minOutgoingVideoBitrateKbit),
     _videoContentType(descriptor.videoContentType),
     _videoCodecPreferences(std::move(descriptor.videoCodecPreferences)),
+    _encryptionKey(descriptor.encryptionKey),
     _eventLog(std::make_unique<webrtc::RtcEventLogNull>()),
     _webrtcEnvironment(webrtc::EnvironmentFactory().Create()),
     _netEqFactory(createNetEqFactory()),
@@ -1495,6 +1822,8 @@ public:
     }
 
     void start() {
+        _startTimestamp = rtc::TimeMillis();
+        
         const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
 
         webrtc::field_trial::InitFieldTrialsFromString(
@@ -1544,6 +1873,13 @@ public:
                     threads->getMediaThread()->PostTask([weak, ssrc, audioLevel, isSpeech]() {
                         if (const auto strong = weak.lock()) {
                             strong->updateSsrcAudioLevel(ssrc, audioLevel, isSpeech);
+                        }
+                    });
+                },
+                [=](uint32_t ssrc) {
+                    threads->getMediaThread()->PostTask([weak, ssrc]() {
+                        if (const auto strong = weak.lock()) {
+                            strong->updateSsrcActivity(ssrc);
                         }
                     });
                 }, threads);
@@ -1673,11 +2009,64 @@ public:
         }*/
 
         beginNetworkStatusTimer(0);
+        beginLogTimer(0);
         //beginAudioChannelCleanupTimer(0);
 
         adjustBitratePreferences(true);
 
         beginRemoteConstraintsUpdateTimer(5000);
+    }
+    
+    void beginLogTimer(int delayMs) {
+        const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
+        _threads->getMediaThread()->PostDelayedTask([weak]() {
+            auto strong = weak.lock();
+            if (!strong) {
+                return;
+            }
+
+            strong->writeStateLogRecords();
+
+            strong->beginLogTimer(1000);
+        }, webrtc::TimeDelta::Millis(delayMs));
+    }
+
+    void writeStateLogRecords() {
+        const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
+        _threads->getWorkerThread()->PostTask([weak]() {
+            auto strong = weak.lock();
+            if (!strong) {
+                return;
+            }
+
+            auto stats = strong->_call->GetStats();
+            float sendBitrateKbps = ((float)stats.send_bandwidth_bps / 1000.0f);
+
+            strong->_threads->getMediaThread()->PostTask([weak, sendBitrateKbps]() {
+                auto strong = weak.lock();
+                if (!strong) {
+                    return;
+                }
+
+                float bitrateNorm = 16.0f;
+                if (strong->_outgoingVideoChannel) {
+                    bitrateNorm = 600.0f;
+                }
+
+                float signalBarsNorm = 4.0f;
+                float adjustedQuality = sendBitrateKbps / bitrateNorm;
+                adjustedQuality = fmaxf(0.0f, adjustedQuality);
+                adjustedQuality = fminf(1.0f, adjustedQuality);
+                if (strong->_signalBarsUpdated) {
+                    strong->_signalBarsUpdated((int)(adjustedQuality * signalBarsNorm));
+                }
+
+                NetworkBitrateLogRecord networkBitrateLogRecord;
+                networkBitrateLogRecord.bitrate = (int32_t)sendBitrateKbps;
+
+                strong->_networkBitrateLogRecords.emplace_back(rtc::TimeMillis(), std::move(networkBitrateLogRecord));
+            });
+        });
     }
 
     void destroyOutgoingVideoChannel() {
@@ -1784,6 +2173,12 @@ public:
             _outgoingVideoChannel->SetRemoteContent(incomingVideoDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _outgoingVideoChannel->SetLocalContent(outgoingVideoDescription.get(), webrtc::SdpType::kOffer, errorDesc);
             _outgoingVideoChannel->SetPayloadTypeDemuxingEnabled(false);
+            
+            if (_encryptionKey) {
+                for (auto ssrc : simulcastGroupSsrcs) {
+                    _outgoingVideoChannel->send_channel()->SetFrameEncryptor(ssrc, rtc::make_ref_counted<FrameEncryptorImpl>(_encryptionKey.value()));
+                }
+            }
         });
 
         adjustVideoSendParams();
@@ -1976,6 +2371,10 @@ public:
             _outgoingAudioChannel->SetLocalContent(outgoingAudioDescription.get(), webrtc::SdpType::kOffer, errorDesc);
             _outgoingAudioChannel->SetRemoteContent(incomingAudioDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _outgoingAudioChannel->SetPayloadTypeDemuxingEnabled(false);
+            
+            if (_encryptionKey) {
+                _outgoingAudioChannel->send_channel()->SetFrameEncryptor(_outgoingAudioSsrc, rtc::make_ref_counted<FrameEncryptorImpl>(_encryptionKey.value()));
+            }
         });
 
         _outgoingAudioChannel->Enable(true);
@@ -1989,6 +2388,54 @@ public:
         _networkManager->perform([](GroupNetworkManager *networkManager) {
             networkManager->stop();
         });
+        
+        json11::Json::object statsLog;
+
+        for (int i = (int)_networkStateLogRecords.size() - 1; i >= 1; i--) {
+            // coalesce events within 5ms
+            if (_networkStateLogRecords[i].timestamp - _networkStateLogRecords[i - 1].timestamp < 5) {
+                _networkStateLogRecords.erase(_networkStateLogRecords.begin() + i - 1);
+            }
+        }
+
+        json11::Json::array jsonNetworkStateLogRecords;
+        int64_t baseTimestamp = 0;
+        for (const auto &record : _networkStateLogRecords) {
+            json11::Json::object jsonRecord;
+
+            if (baseTimestamp == 0) {
+                baseTimestamp = record.timestamp;
+            }
+            jsonRecord.insert(std::make_pair("t", json11::Json(std::to_string(record.timestamp - baseTimestamp))));
+            jsonRecord.insert(std::make_pair("c", json11::Json(record.record.isConnected ? 1 : 0)));
+            if (record.record.isFailed) {
+                jsonRecord.insert(std::make_pair("failed", json11::Json(1)));
+            }
+
+            jsonNetworkStateLogRecords.push_back(std::move(jsonRecord));
+        }
+        statsLog.insert(std::make_pair("network", std::move(jsonNetworkStateLogRecords)));
+
+        json11::Json::array jsonNetworkBitrateLogRecords;
+        for (const auto &record : _networkBitrateLogRecords) {
+            json11::Json::object jsonRecord;
+
+            jsonRecord.insert(std::make_pair("b", json11::Json(record.record.bitrate)));
+
+            jsonNetworkBitrateLogRecords.push_back(std::move(jsonRecord));
+        }
+        statsLog.insert(std::make_pair("bitrate", std::move(jsonNetworkBitrateLogRecords)));
+
+        auto jsonStatsLog = json11::Json(std::move(statsLog));
+
+        if (!_statsLogPath.empty()) {
+            std::ofstream file;
+            file.open(_statsLogPath);
+
+            file << jsonStatsLog.dump();
+
+            file.close();
+        }
     }
 
     void updateSsrcAudioLevel(uint32_t ssrc, uint8_t audioLevel, bool isSpeech) {
@@ -2021,6 +2468,17 @@ public:
             audioChannel->second->updateActivity();
         }
     }
+    
+    void updateSsrcActivity(uint32_t ssrc) {
+        auto it = _ssrcActivities.find(ChannelId(ssrc));
+        if (it != _ssrcActivities.end()) {
+            it->second.timestamp = rtc::TimeMillis();
+        } else {
+            InternalGroupActivityValue updated;
+            updated.timestamp = rtc::TimeMillis();
+            _ssrcActivities.insert(std::make_pair(ChannelId(ssrc), std::move(updated)));
+        }
+    }
 
     void beginLevelsTimer(int timeoutMs) {
         const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
@@ -2036,13 +2494,6 @@ public:
             GroupLevelsUpdate levelsUpdate;
             levelsUpdate.updates.reserve(strong->_audioLevels.size() + 1);
             for (auto &it : strong->_audioLevels) {
-                /*if (it.second.value.level < 0.001f) {
-                    continue;
-                }
-                if (it.second.timestamp <= timestamp - maxSampleTimeout) {
-                    continue;
-                }*/
-
                 uint32_t effectiveSsrc = it.first.actualSsrc;
                 if (std::find_if(levelsUpdate.updates.begin(), levelsUpdate.updates.end(), [&](GroupLevelUpdate const &item) {
                     return item.ssrc == effectiveSsrc;
@@ -2059,19 +2510,33 @@ public:
                         audioChannel->second->updateActivity();
                     }
                 }
-
-                //it.second.value.level *= 0.5f;
-                //it.second.value.voice = false;
             }
-
             strong->_audioLevels.clear();
 
             auto myAudioLevel = strong->_myAudioLevel;
             myAudioLevel.isMuted = strong->_isMuted;
             levelsUpdate.updates.push_back(GroupLevelUpdate{ 0, myAudioLevel });
+            
+            GroupActivitiesUpdate activitiesUpdate;
+            activitiesUpdate.updates.reserve(strong->_ssrcActivities.size());
+            for (auto &it : strong->_ssrcActivities) {
+                uint32_t effectiveSsrc = it.first.actualSsrc;
+                if (std::find_if(activitiesUpdate.updates.begin(), activitiesUpdate.updates.end(), [&](GroupActivityUpdate const &item) {
+                    return item.ssrc == effectiveSsrc;
+                }) != activitiesUpdate.updates.end()) {
+                    continue;
+                }
+                activitiesUpdate.updates.push_back(GroupActivityUpdate{
+                    effectiveSsrc
+                });
+            }
+            strong->_ssrcActivities.clear();
 
             if (strong->_audioLevelsUpdated) {
                 strong->_audioLevelsUpdated(levelsUpdate);
+            }
+            if (strong->_activitiesUpdated) {
+                strong->_activitiesUpdated(activitiesUpdate);
             }
 
             bool isSpeech = myAudioLevel.voice && !myAudioLevel.isMuted;
@@ -2272,6 +2737,7 @@ public:
             return;
         }
 
+        _videoExtensionMap.emplace_back(1, webrtc::RtpExtension::kAudioLevelUri);
         _videoExtensionMap.emplace_back(2, webrtc::RtpExtension::kAbsSendTimeUri);
         _videoExtensionMap.emplace_back(3, webrtc::RtpExtension::kTransportSequenceNumberUri);
         _videoExtensionMap.emplace_back(13, webrtc::RtpExtension::kVideoRotationUri);
@@ -2377,6 +2843,21 @@ public:
             if (_networkStateUpdated) {
                 _networkStateUpdated(_effectiveNetworkState);
             }
+        }
+        
+        NetworkStateLogRecord record;
+        record.isConnected = effectiveNetworkState.isConnected;
+        record.isFailed = false;
+        
+        if (effectiveNetworkState.isConnected && !_hasBeenConnected) {
+            _hasBeenConnected = true;
+            auto connectionTimeMs = rtc::TimeMillis() - _startTimestamp;
+            RTC_LOG(LS_INFO) << "Connected in " << connectionTimeMs << " ms";
+        }
+
+        if (!_currentNetworkStateLogRecord || !(_currentNetworkStateLogRecord.value() == record)) {
+            _currentNetworkStateLogRecord = record;
+            _networkStateLogRecords.emplace_back(rtc::TimeMillis(), std::move(record));
         }
     }
 
@@ -2790,7 +3271,9 @@ public:
 
         uint32_t outgoingVideoSsrcBase = _outgoingAudioSsrc + 1;
         int numVideoSimulcastLayers = 3;
-        if (_videoContentType == VideoContentType::Screencast) {
+        if (_isConference) {
+            numVideoSimulcastLayers = 1;
+        } else if (_videoContentType == VideoContentType::Screencast) {
             numVideoSimulcastLayers = 2;
         }
         _outgoingVideoSsrcs.simulcastLayers.clear();
@@ -3004,7 +3487,8 @@ public:
             VideoChannelDescription::Quality::Thumbnail,
             VideoChannelDescription::Quality::Thumbnail,
             videoInformation,
-            _threads
+            _threads,
+            _encryptionKey
         ));
 
         ChannelSsrcInfo mapping;
@@ -3167,7 +3651,8 @@ public:
             ssrc,
             std::move(onAudioSinkUpdate),
             _onAudioFrame,
-            _threads
+            _threads,
+            _encryptionKey
         ));
 
         auto volume = _volumeBySsrc.find(ssrc.actualSsrc);
@@ -3237,7 +3722,8 @@ public:
             minQuality,
             maxQuality,
             videoInformation,
-            _threads
+            _threads,
+            _encryptionKey
         ));
 
         const auto pendingSinks = _pendingVideoSinks.find(VideoChannelId(videoInformation.endpointId));
@@ -3387,10 +3873,11 @@ private:
         auto onMutedSpeechActivityDetected = _onMutedSpeechActivityDetected;
 #ifdef WEBRTC_IOS
         bool disableRecording = _disableAudioInput;
+        bool enableSystemMute = _enableSystemMute;
 #endif
         const auto create = [&](webrtc::AudioDeviceModule::AudioLayer layer) {
 #ifdef WEBRTC_IOS
-            auto result = rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, disableRecording, disableRecording ? 2 : 1);
+            auto result = rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, disableRecording, enableSystemMute, disableRecording ? 2 : 1);
             if (result) {
                 result->mutedSpeechDetectionChanged = ^(bool value) {
                     if (onMutedSpeechActivityDetected) {
@@ -3436,8 +3923,11 @@ private:
     GroupConnectionMode _connectionMode = GroupConnectionMode::GroupConnectionModeNone;
     bool _isUnifiedBroadcast = false;
 
+    std::string _statsLogPath;
     std::function<void(GroupNetworkState)> _networkStateUpdated;
+    std::function<void(int)> _signalBarsUpdated;
     std::function<void(GroupLevelsUpdate const &)> _audioLevelsUpdated;
+    std::function<void(GroupActivitiesUpdate const &)> _activitiesUpdated;
     std::function<void(uint32_t, const AudioFrame &)> _onAudioFrame;
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> _requestMediaChannelDescriptions;
     std::function<std::shared_ptr<BroadcastPartTask>(std::function<void(int64_t)>)> _requestCurrentTime;
@@ -3452,10 +3942,13 @@ private:
     bool _disableOutgoingAudioProcessing{false};
 #ifdef WEBRTC_IOS
     bool _disableAudioInput{false};
+    bool _enableSystemMute{false};
 #endif
+    bool _isConference{false};
     int _minOutgoingVideoBitrateKbit{100};
     VideoContentType _videoContentType{VideoContentType::None};
     std::vector<VideoCodecName> _videoCodecPreferences;
+    std::optional<EncryptionKey> _encryptionKey;
 
     int _nextMediaChannelDescriptionsRequestId = 0;
     std::map<int, RequestedMediaChannelDescriptions> _requestedMediaChannelDescriptions;
@@ -3499,6 +3992,8 @@ private:
 
     std::map<ChannelId, InternalGroupLevelValue> _audioLevels;
     GroupLevelValue _myAudioLevel;
+    
+    std::map<ChannelId, InternalGroupActivityValue> _ssrcActivities;
 
     bool _isMuted = true;
     std::shared_ptr<NoiseSuppressionConfiguration> _noiseSuppressionConfiguration;
@@ -3525,6 +4020,13 @@ private:
     absl::optional<int64_t> _broadcastEnabledUntilRtcIsConnectedAtTimestamp;
     bool _isDataChannelOpen = false;
     GroupNetworkState _effectiveNetworkState;
+    
+    int64_t _startTimestamp = 0;
+    bool _hasBeenConnected = false;
+
+    absl::optional<NetworkStateLogRecord> _currentNetworkStateLogRecord;
+    std::vector<StateLogRecord<NetworkStateLogRecord>> _networkStateLogRecords;
+    std::vector<StateLogRecord<NetworkBitrateLogRecord>> _networkBitrateLogRecords;
 
     std::shared_ptr<StreamingMediaContext> _streamingContext;
 
@@ -3565,9 +4067,12 @@ GroupInstanceCustomImpl::~GroupInstanceCustomImpl() {
     _threads->getMediaThread()->BlockingCall([] {});
 }
 
-void GroupInstanceCustomImpl::stop() {
-    _internal->perform([](GroupInstanceCustomInternal *internal) {
+void GroupInstanceCustomImpl::stop(std::function<void()> completion) {
+    _internal->perform([completion](GroupInstanceCustomInternal *internal) {
         internal->stop();
+        if (completion) {
+            completion();
+        }
     });
 }
 
