@@ -216,6 +216,7 @@ public:
     virtual void setRequestedVideoChannels(std::vector<VideoChannelDescription> &&requestedVideoChannels) = 0;
 
     virtual void getStats(std::function<void(GroupInstanceStats)> completion) = 0;
+    virtual void internal_addCustomNetworkEvent(bool isRemoteConnected) = 0;
 
     struct AudioDevice {
       enum class Type {Input, Output};

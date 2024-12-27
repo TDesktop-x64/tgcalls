@@ -45,6 +45,7 @@ public:
     void setRequestedVideoChannels(std::vector<VideoChannelDescription> &&requestedVideoChannels);
 
     void getStats(std::function<void(GroupInstanceStats)> completion);
+    void internal_addCustomNetworkEvent(bool isRemoteConnected);
 
 private:
     std::shared_ptr<Threads> _threads;

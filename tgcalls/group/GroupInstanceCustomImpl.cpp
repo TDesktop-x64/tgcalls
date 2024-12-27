@@ -2391,6 +2391,13 @@ public:
                 _networkStateLogRecords.erase(_networkStateLogRecords.begin() + i - 1);
             }
         }
+        
+        for (int i = (int)_remoteNetworkStateLogRecords.size() - 1; i >= 1; i--) {
+            // coalesce events within 5ms
+            if (_remoteNetworkStateLogRecords[i].timestamp - _remoteNetworkStateLogRecords[i - 1].timestamp < 5) {
+                _remoteNetworkStateLogRecords.erase(_remoteNetworkStateLogRecords.begin() + i - 1);
+            }
+        }
 
         json11::Json::array jsonNetworkStateLogRecords;
         int64_t baseTimestamp = 0;
@@ -2409,6 +2416,20 @@ public:
             jsonNetworkStateLogRecords.push_back(std::move(jsonRecord));
         }
         statsLog.insert(std::make_pair("network", std::move(jsonNetworkStateLogRecords)));
+        
+        json11::Json::array jsonRemoteNetworkStateLogRecords;
+        for (const auto &record : _remoteNetworkStateLogRecords) {
+            json11::Json::object jsonRecord;
+
+            jsonRecord.insert(std::make_pair("t", json11::Json(std::to_string(record.timestamp - baseTimestamp))));
+            jsonRecord.insert(std::make_pair("c", json11::Json(record.record.isConnected ? 1 : 0)));
+            if (record.record.isFailed) {
+                jsonRecord.insert(std::make_pair("failed", json11::Json(1)));
+            }
+
+            jsonRemoteNetworkStateLogRecords.push_back(std::move(jsonRecord));
+        }
+        statsLog.insert(std::make_pair("remotenetwork", std::move(jsonRemoteNetworkStateLogRecords)));
 
         json11::Json::array jsonNetworkBitrateLogRecords;
         for (const auto &record : _networkBitrateLogRecords) {
@@ -3860,6 +3881,14 @@ public:
 
         completion(result);
     }
+    
+    void internal_addCustomNetworkEvent(bool isRemoteConnected) {
+        NetworkStateLogRecord record;
+        record.isConnected = isRemoteConnected;
+        record.isFailed = false;
+        
+        _remoteNetworkStateLogRecords.emplace_back(rtc::TimeMillis(), std::move(record));
+    }
 
 private:
     webrtc::scoped_refptr<WrappedAudioDeviceModule> createAudioDeviceModule() {
@@ -4020,6 +4049,7 @@ private:
 
     absl::optional<NetworkStateLogRecord> _currentNetworkStateLogRecord;
     std::vector<StateLogRecord<NetworkStateLogRecord>> _networkStateLogRecords;
+    std::vector<StateLogRecord<NetworkStateLogRecord>> _remoteNetworkStateLogRecords;
     std::vector<StateLogRecord<NetworkBitrateLogRecord>> _networkBitrateLogRecords;
 
     std::shared_ptr<StreamingMediaContext> _streamingContext;
@@ -4169,6 +4199,12 @@ void GroupInstanceCustomImpl::setRequestedVideoChannels(std::vector<VideoChannel
 void GroupInstanceCustomImpl::getStats(std::function<void(GroupInstanceStats)> completion) {
     _internal->perform([completion = std::move(completion)](GroupInstanceCustomInternal *internal) mutable {
         internal->getStats(completion);
+    });
+}
+
+void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {
+    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {
+        internal->internal_addCustomNetworkEvent(isRemoteConnected);
     });
 }
 
