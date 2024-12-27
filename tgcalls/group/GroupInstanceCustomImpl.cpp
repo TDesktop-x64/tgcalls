@@ -1423,13 +1423,7 @@ public:
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
             
             if (encryptionKey) {
-                for (const auto &group : description.ssrcGroups) {
-                    if (group.semantics == "SIM") {
-                        for (uint32_t ssrc : group.ssrcs) {
-                            _videoChannel->receive_channel()->SetFrameDecryptor(ssrc, rtc::make_ref_counted<FrameDecryptorImpl>(encryptionKey.value()));
-                        }
-                    }
-                }
+                _videoChannel->receive_channel()->SetFrameDecryptor(_mainVideoSsrc, rtc::make_ref_counted<FrameDecryptorImpl>(encryptionKey.value()));
             }
         });
 
