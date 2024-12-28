@@ -872,6 +872,61 @@ private:
 };
 #endif
 
+class AudioInjectionPostProcessor : public webrtc::CustomProcessing {
+public:
+    AudioInjectionPostProcessor(std::vector<float> *externalAudioSamples, webrtc::Mutex *externalAudioSamplesMutex) :
+    _externalAudioSamples(externalAudioSamples),
+    _externalAudioSamplesMutex(externalAudioSamplesMutex) {
+    }
+
+    virtual ~AudioInjectionPostProcessor() {
+    }
+
+private:
+    virtual void Initialize(int sample_rate_hz, int num_channels) override {
+    }
+
+    virtual void Process(webrtc::AudioBuffer *buffer) override {
+        if (!buffer) {
+            return;
+        }
+        if (buffer->num_channels() != 1) {
+            return;
+        }
+
+        if (_externalAudioSamplesMutex && _externalAudioSamples) {
+            _externalAudioSamplesMutex->Lock();
+            if (!_externalAudioSamples->empty()) {
+                float *bufferData = buffer->channels()[0];
+                int takenSamples = 0;
+                for (int i = 0; i < _externalAudioSamples->size() && i < buffer->num_frames(); i++) {
+                    float sample = (*_externalAudioSamples)[i];
+                    sample += bufferData[i];
+                    sample = std::min(sample, 32768.f);
+                    sample = std::max(sample, -32768.f);
+                    bufferData[i] = sample;
+                    takenSamples++;
+                }
+                if (takenSamples != 0) {
+                    _externalAudioSamples->erase(_externalAudioSamples->begin(), _externalAudioSamples->begin() + takenSamples);
+                }
+            }
+            _externalAudioSamplesMutex->Unlock();
+        }
+    }
+
+    virtual std::string ToString() const override {
+        return "CustomPostProcessing";
+    }
+
+    virtual void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting setting) override {
+    }
+
+private:
+    std::vector<float> *_externalAudioSamples = nullptr;
+    webrtc::Mutex *_externalAudioSamplesMutex = nullptr;
+};
+
 class ExternalAudioRecorder : public FakeAudioDeviceModule::Recorder {
 public:
     ExternalAudioRecorder(std::vector<float> *externalAudioSamples, webrtc::Mutex *externalAudioSamplesMutex) :
@@ -1423,13 +1478,7 @@ public:
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
             
             if (encryptionKey) {
-                for (const auto &group : description.ssrcGroups) {
-                    if (group.semantics == "SIM") {
-                        for (uint32_t ssrc : group.ssrcs) {
-                            _videoChannel->receive_channel()->SetFrameDecryptor(ssrc, rtc::make_ref_counted<FrameDecryptorImpl>(encryptionKey.value()));
-                        }
-                    }
-                }
+                _videoChannel->receive_channel()->SetFrameDecryptor(_mainVideoSsrc, rtc::make_ref_counted<FrameDecryptorImpl>(encryptionKey.value()));
             }
         });
 
@@ -1886,7 +1935,7 @@ public:
         }));
 
     #if USE_RNNOISE
-        std::unique_ptr<AudioCapturePostProcessor> audioProcessor = nullptr;
+        std::unique_ptr<webrtc::CustomProcessing> audioProcessor = nullptr;
     #endif
         if (_videoContentType != VideoContentType::Screencast) {
             int numChannels = 1;
@@ -1908,6 +1957,10 @@ public:
                 });
             }, _noiseSuppressionConfiguration, nullptr, nullptr);
     #endif
+        } else {
+            #ifdef WEBRTC_IOS
+            audioProcessor = std::make_unique<AudioInjectionPostProcessor>(&_externalAudioSamples, &_externalAudioSamplesMutex);
+            #endif
         }
 
         _audioDeviceDataObserverShared = std::make_shared<AudioDeviceDataObserverShared>();
@@ -2397,6 +2450,13 @@ public:
                 _networkStateLogRecords.erase(_networkStateLogRecords.begin() + i - 1);
             }
         }
+        
+        for (int i = (int)_remoteNetworkStateLogRecords.size() - 1; i >= 1; i--) {
+            // coalesce events within 5ms
+            if (_remoteNetworkStateLogRecords[i].timestamp - _remoteNetworkStateLogRecords[i - 1].timestamp < 5) {
+                _remoteNetworkStateLogRecords.erase(_remoteNetworkStateLogRecords.begin() + i - 1);
+            }
+        }
 
         json11::Json::array jsonNetworkStateLogRecords;
         int64_t baseTimestamp = 0;
@@ -2415,6 +2475,20 @@ public:
             jsonNetworkStateLogRecords.push_back(std::move(jsonRecord));
         }
         statsLog.insert(std::make_pair("network", std::move(jsonNetworkStateLogRecords)));
+        
+        json11::Json::array jsonRemoteNetworkStateLogRecords;
+        for (const auto &record : _remoteNetworkStateLogRecords) {
+            json11::Json::object jsonRecord;
+
+            jsonRecord.insert(std::make_pair("t", json11::Json(std::to_string(record.timestamp - baseTimestamp))));
+            jsonRecord.insert(std::make_pair("c", json11::Json(record.record.isConnected ? 1 : 0)));
+            if (record.record.isFailed) {
+                jsonRecord.insert(std::make_pair("failed", json11::Json(1)));
+            }
+
+            jsonRemoteNetworkStateLogRecords.push_back(std::move(jsonRecord));
+        }
+        statsLog.insert(std::make_pair("remotenetwork", std::move(jsonRemoteNetworkStateLogRecords)));
 
         json11::Json::array jsonNetworkBitrateLogRecords;
         for (const auto &record : _networkBitrateLogRecords) {
@@ -3866,6 +3940,14 @@ public:
 
         completion(result);
     }
+    
+    void internal_addCustomNetworkEvent(bool isRemoteConnected) {
+        NetworkStateLogRecord record;
+        record.isConnected = isRemoteConnected;
+        record.isFailed = false;
+        
+        _remoteNetworkStateLogRecords.emplace_back(rtc::TimeMillis(), std::move(record));
+    }
 
 private:
     webrtc::scoped_refptr<WrappedAudioDeviceModule> createAudioDeviceModule() {
@@ -4026,6 +4108,7 @@ private:
 
     absl::optional<NetworkStateLogRecord> _currentNetworkStateLogRecord;
     std::vector<StateLogRecord<NetworkStateLogRecord>> _networkStateLogRecords;
+    std::vector<StateLogRecord<NetworkStateLogRecord>> _remoteNetworkStateLogRecords;
     std::vector<StateLogRecord<NetworkBitrateLogRecord>> _networkBitrateLogRecords;
 
     std::shared_ptr<StreamingMediaContext> _streamingContext;
@@ -4175,6 +4258,12 @@ void GroupInstanceCustomImpl::setRequestedVideoChannels(std::vector<VideoChannel
 void GroupInstanceCustomImpl::getStats(std::function<void(GroupInstanceStats)> completion) {
     _internal->perform([completion = std::move(completion)](GroupInstanceCustomInternal *internal) mutable {
         internal->getStats(completion);
+    });
+}
+
+void GroupInstanceCustomImpl::internal_addCustomNetworkEvent(bool isRemoteConnected) {
+    _internal->perform([isRemoteConnected](GroupInstanceCustomInternal *internal) {
+        internal->internal_addCustomNetworkEvent(isRemoteConnected);
     });
 }
 

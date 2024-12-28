@@ -90,6 +90,10 @@ SignalingProtocolVersion signalingProtocolVersion(std::string const &version) {
         return SignalingProtocolVersion::V2;
     } else if (version == "9.0.0") {
         return SignalingProtocolVersion::V2;
+    } else if (version == "12.0.0") {
+        return SignalingProtocolVersion::V3;
+    } else if (version == "13.0.0") {
+        return SignalingProtocolVersion::V3;
     } else {
         RTC_LOG(LS_ERROR) << "signalingProtocolVersion: unknown version " << version;
 
@@ -2336,6 +2340,8 @@ std::vector<std::string> InstanceV2Impl::GetVersions() {
     result.push_back("7.0.0");
     result.push_back("8.0.0");
     result.push_back("9.0.0");
+    result.push_back("12.0.0");
+    result.push_back("13.0.0");
     return result;
 }
 
