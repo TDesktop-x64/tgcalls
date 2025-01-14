@@ -516,6 +516,8 @@ _dataChannelMessageReceived(configuration.dataChannelMessageReceived) {
     
     _localCertificate = rtc::RTCCertificateGenerator::GenerateCertificate(rtc::KeyParams(rtc::KT_ECDSA), absl::nullopt);
     
+    _underlyingSocketFactory = _threads->getNetworkThread()->socketserver();
+    
     _networkMonitorFactory = PlatformInterface::SharedInstance()->createNetworkMonitorFactory();
     if (getCustomParameterBool(_customParameters, "network_standalone_reflectors")) {
         _socketFactory = std::make_unique<WrappedBasicPacketSocketFactory>(std::make_unique<rtc::BasicPacketSocketFactory>(_threads->getNetworkThread()->socketserver()), true);
@@ -556,6 +558,7 @@ NativeNetworkingImpl::~NativeNetworkingImpl() {
     _asyncResolverFactory.reset();
     _portAllocator.reset();
     _networkManager.reset();
+    _underlyingSocketFactory = nullptr;
     _socketFactory.reset();
     _networkMonitorFactory.reset();
 }
@@ -576,7 +579,7 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
         }
     }
     
-    _relayPortFactory.reset(new ReflectorRelayPortFactory(_rtcServers, standaloneReflectorMode, standaloneReflectorRoleId));
+    _relayPortFactory.reset(new ReflectorRelayPortFactory(_rtcServers, standaloneReflectorMode, standaloneReflectorRoleId, _underlyingSocketFactory));
 
     _portAllocator.reset(new cricket::BasicPortAllocator(_networkManager.get(), _socketFactory.get(), _turnCustomizer.get(), _relayPortFactory.get()));
 
@@ -615,16 +618,12 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
     std::vector<cricket::RelayServerConfig> turnServers;
 
     for (auto &server : _rtcServers) {
-        if (server.isTcp) {
-            continue;
-        }
-        
         if (server.isTurn) {
             turnServers.push_back(cricket::RelayServerConfig(
                 rtc::SocketAddress(server.host, server.port),
                 server.login,
                 server.password,
-                cricket::PROTO_UDP
+                server.isTcp ? cricket::PROTO_TCP : cricket::PROTO_UDP
             ));
         } else {
             rtc::SocketAddress stunAddress = rtc::SocketAddress(server.host, server.port);

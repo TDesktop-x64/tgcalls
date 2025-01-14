@@ -2151,7 +2151,9 @@ public:
 
         cricket::VideoOptions videoOptions;
         if (_videoContentType == VideoContentType::Screencast) {
+            #ifndef WEBRTC_IOS
             videoOptions.is_screencast = true;
+            #endif
         }
         _outgoingVideoChannel = _channelManager->CreateVideoChannel(_call.get(), cricket::MediaConfig(), "1", false, GroupNetworkManager::getDefaulCryptoOptions(), videoOptions, _videoBitrateAllocatorFactory.get());
         _threads->getNetworkThread()->BlockingCall([&]() {
@@ -3470,7 +3472,7 @@ public:
     }
 
     void setJoinResponsePayload(std::string const &payload) {
-        RTC_LOG(LS_INFO) << formatTimestampMillis(rtc::TimeMillis()) << ": " << "setJoinResponsePayload";
+        RTC_LOG(LS_INFO) << formatTimestampMillis(rtc::TimeMillis()) << ": " << "setJoinResponsePayload: " << payload;
 
         auto parsedPayload = GroupJoinResponsePayload::parse(payload);
         if (!parsedPayload) {
