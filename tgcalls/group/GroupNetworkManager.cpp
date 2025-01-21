@@ -506,7 +506,7 @@ void GroupNetworkManager::setRemoteParams(PeerIceParameters const &remoteIcePara
     cricket::IceParameters parameters(
         remoteIceParameters.ufrag,
         remoteIceParameters.pwd,
-        false
+        true
     );
 
     _transportChannel->SetRemoteIceParameters(parameters);
