@@ -6,7 +6,6 @@
 #import "InstanceImpl.h"
 #import "v2/InstanceV2Impl.h"
 #import "v2/InstanceV2ReferenceImpl.h"
-#import "v2_4_0_0/InstanceV2_4_0_0Impl.h"
 #include "StaticThreads.h"
 
 #import "VideoCaptureInterface.h"
@@ -14,7 +13,6 @@
 
 #ifndef WEBRTC_IOS
 #import "platform/darwin/VideoMetalViewMac.h"
-#import "platform/darwin/GLVideoViewMac.h"
 #import "platform/darwin/VideoSampleBufferViewMac.h"
 #define UIViewContentModeScaleAspectFill kCAGravityResizeAspectFill
 #define UIViewContentModeScaleAspect kCAGravityResizeAspect
@@ -136,51 +134,6 @@
 
 @end
 
-@interface GLVideoView (VideoViewImpl) <OngoingCallThreadLocalContextWebrtcVideoView, OngoingCallThreadLocalContextWebrtcVideoViewImpl>
-
-@property (nonatomic, readwrite) OngoingCallVideoOrientationWebrtc orientation;
-@property (nonatomic, readonly) CGFloat aspect;
-
-@end
-
-@implementation GLVideoView (VideoViewImpl)
-
-- (OngoingCallVideoOrientationWebrtc)orientation {
-    return (OngoingCallVideoOrientationWebrtc)self.internalOrientation;
-}
-
-- (CGFloat)aspect {
-    return self.internalAspect;
-}
-
-- (void)setOrientation:(OngoingCallVideoOrientationWebrtc)orientation {
-    [self setInternalOrientation:(int)orientation];
-}
-
-- (void)setOnOrientationUpdated:(void (^ _Nullable)(OngoingCallVideoOrientationWebrtc, CGFloat))onOrientationUpdated {
-    if (onOrientationUpdated) {
-        [self internalSetOnOrientationUpdated:^(int value, CGFloat aspect) {
-            onOrientationUpdated((OngoingCallVideoOrientationWebrtc)value, aspect);
-        }];
-    } else {
-        [self internalSetOnOrientationUpdated:nil];
-    }
-}
-
-- (void)setOnIsMirroredUpdated:(void (^ _Nullable)(bool))onIsMirroredUpdated {
-    if (onIsMirroredUpdated) {
-        [self internalSetOnIsMirroredUpdated:^(bool value) {
-            onIsMirroredUpdated(value);
-        }];
-    } else {
-        [self internalSetOnIsMirroredUpdated:nil];
-    }
-}
-
-- (void)updateIsEnabled:(bool)__unused isEnabled {
-}
-
-@end
 
 @interface VideoSampleBufferView (VideoViewImpl) <OngoingCallThreadLocalContextWebrtcVideoView, OngoingCallThreadLocalContextWebrtcVideoViewImpl>
 
@@ -331,7 +284,7 @@
 
 @implementation CallVideoFrameData
 
-- (instancetype)initWithBuffer:(id<CallVideoFrameBuffer>)buffer frame:(webrtc::VideoFrame const &)frame mirrorHorizontally:(bool)mirrorHorizontally mirrorVertically:(bool)mirrorVertically {
+- (instancetype)initWithBuffer:(id<CallVideoFrameBuffer>)buffer frame:(webrtc::VideoFrame const &)frame mirrorHorizontally:(bool)mirrorHorizontally mirrorVertically:(bool)mirrorVertically hasDeviceRelativeVideoRotation:(bool)hasDeviceRelativeVideoRotation deviceRelativeVideoRotation:(OngoingCallVideoOrientationWebrtc)deviceRelativeVideoRotation {
     self = [super init];
     if (self != nil) {
         _buffer = buffer;
@@ -361,6 +314,9 @@
                 break;
             }
         }
+        
+        _hasDeviceRelativeOrientation = hasDeviceRelativeVideoRotation;
+        _deviceRelativeOrientation = deviceRelativeVideoRotation;
 
         _mirrorHorizontally = mirrorHorizontally;
         _mirrorVertically = mirrorVertically;
@@ -369,6 +325,7 @@
 }
 
 @end
+
 
 namespace {
 
@@ -410,6 +367,9 @@ private:
 
             bool mirrorHorizontally = false;
             bool mirrorVertically = false;
+            
+            bool hasDeviceRelativeVideoRotation = false;
+            OngoingCallVideoOrientationWebrtc deviceRelativeVideoRotation = OngoingCallVideoOrientation0;
 
             if (videoFrame.video_frame_buffer()->type() == webrtc::VideoFrameBuffer::Type::kNative) {
                 id<RTC_OBJC_TYPE(RTCVideoFrameBuffer)> nativeBuffer = static_cast<webrtc::ObjCFrameBuffer *>(videoFrame.video_frame_buffer().get())->wrapped_frame_buffer();
@@ -419,17 +379,40 @@ private:
                 }
                 if ([nativeBuffer isKindOfClass:[TGRTCCVPixelBuffer class]]) {
                     if (((TGRTCCVPixelBuffer *)nativeBuffer).shouldBeMirrored) {
-                        switch (videoFrame.rotation()) {
-                            case webrtc::kVideoRotation_0:
-                            case webrtc::kVideoRotation_180:
-                                mirrorHorizontally = true;
-                                break;
-                            case webrtc::kVideoRotation_90:
-                            case webrtc::kVideoRotation_270:
-                                mirrorVertically = true;
-                                break;
-                            default:
-                                break;
+                        TGRTCCVPixelBuffer *tgNativeBuffer = (TGRTCCVPixelBuffer *)nativeBuffer;
+                        if (tgNativeBuffer.shouldBeMirrored) {
+                            switch (videoFrame.rotation()) {
+                                case webrtc::kVideoRotation_0:
+                                case webrtc::kVideoRotation_180:
+                                    mirrorHorizontally = true;
+                                    break;
+                                case webrtc::kVideoRotation_90:
+                                case webrtc::kVideoRotation_270:
+                                    mirrorVertically = true;
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                        if (tgNativeBuffer.deviceRelativeVideoRotation != -1) {
+                            hasDeviceRelativeVideoRotation = true;
+                            switch (tgNativeBuffer.deviceRelativeVideoRotation) {
+                                case webrtc::kVideoRotation_0:
+                                    deviceRelativeVideoRotation = OngoingCallVideoOrientation0;
+                                    break;
+                                case webrtc::kVideoRotation_90:
+                                    deviceRelativeVideoRotation = OngoingCallVideoOrientation90;
+                                    break;
+                                case webrtc::kVideoRotation_180:
+                                    deviceRelativeVideoRotation = OngoingCallVideoOrientation180;
+                                    break;
+                                case webrtc::kVideoRotation_270:
+                                    deviceRelativeVideoRotation = OngoingCallVideoOrientation270;
+                                    break;
+                                default:
+                                    deviceRelativeVideoRotation = OngoingCallVideoOrientation0;
+                                    break;
+                            }
                         }
                     }
                 }
@@ -442,8 +425,9 @@ private:
             }
 
             if (storedSink && mappedBuffer) {
-                storedSink([[CallVideoFrameData alloc] initWithBuffer:mappedBuffer frame:videoFrame mirrorHorizontally:mirrorHorizontally mirrorVertically:mirrorVertically]);
+                storedSink([[CallVideoFrameData alloc] initWithBuffer:mappedBuffer frame:videoFrame mirrorHorizontally:mirrorHorizontally mirrorVertically:mirrorVertically hasDeviceRelativeVideoRotation:hasDeviceRelativeVideoRotation deviceRelativeVideoRotation:deviceRelativeVideoRotation]);
             }
+
         }));
     }
     return self;
@@ -642,7 +626,7 @@ tgcalls::VideoCaptureInterfaceObject *GetVideoCaptureAssumingSameThread(tgcalls:
                 }
 
                 completion(remoteRenderer, cloneRenderer);
-            } else if ([VideoMetalView isSupported]) {
+            } else {
                 VideoMetalView *remoteRenderer = [[VideoMetalView alloc] initWithFrame:CGRectZero];
                 remoteRenderer.videoContentMode = UIViewContentModeScaleAspectFill;
 
@@ -662,16 +646,6 @@ tgcalls::VideoCaptureInterfaceObject *GetVideoCaptureAssumingSameThread(tgcalls:
                 interface->setOutput(sink);
 
                 completion(remoteRenderer, cloneRenderer);
-            } else {
-                GLVideoView *remoteRenderer = [[GLVideoView alloc] initWithFrame:CGRectZero];
-    #ifndef WEBRTC_IOS
-                remoteRenderer.videoContentMode = UIViewContentModeScaleAspectFill;
-    #endif
-
-                std::shared_ptr<rtc::VideoSinkInterface<webrtc::VideoFrame>> sink = [remoteRenderer getSink];
-                interface->setOutput(sink);
-
-                completion(remoteRenderer, nil);
             }
         });
     };
@@ -709,6 +683,10 @@ tgcalls::VideoCaptureInterfaceObject *GetVideoCaptureAssumingSameThread(tgcalls:
     NSTimeInterval _callRingTimeout;
     NSTimeInterval _callConnectTimeout;
     NSTimeInterval _callPacketTimeout;
+    
+    int _nextSinkId;
+    NSMutableDictionary<NSNumber *, GroupCallVideoSink *> *_sinks;
+
     
     std::unique_ptr<tgcalls::Instance> _tgVoip;
     bool _didStop;
@@ -806,7 +784,6 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         tgcalls::Register<tgcalls::InstanceImpl>();
-        tgcalls::Register<tgcalls::InstanceV2_4_0_0Impl>();
         tgcalls::Register<tgcalls::InstanceV2Impl>();
         tgcalls::Register<tgcalls::InstanceV2ReferenceImpl>();
     });
@@ -846,6 +823,9 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
         assert([queue isCurrent]);
         
         assert([[OngoingCallThreadLocalContextWebrtc versionsWithIncludeReference:true] containsObject:version]);
+        
+        _sinks = [[NSMutableDictionary alloc] init];
+
         
         _callReceiveTimeout = 20.0;
         _callRingTimeout = 90.0;
@@ -1235,40 +1215,59 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
     }
 }
 
+
+- (GroupCallDisposable * _Nonnull)addVideoOutputWithIsIncoming:(bool)isIncoming sink:(void (^_Nonnull)(CallVideoFrameData * _Nonnull))sink {
+    int sinkId = _nextSinkId;
+    _nextSinkId += 1;
+    
+    GroupCallVideoSink *storedSink = [[GroupCallVideoSink alloc] initWithSink:sink];
+    _sinks[@(sinkId)] = storedSink;
+
+    if (_tgVoip) {
+        if (isIncoming) {
+            _tgVoip->setIncomingVideoOutput([storedSink sink]);
+        }
+    }
+    
+    if (!isIncoming) {
+        [_videoCapturer addVideoOutput:sink];
+    }
+
+    __weak OngoingCallThreadLocalContextWebrtc *weakSelf = self;
+    id<OngoingCallThreadLocalContextQueueWebrtc> queue = _queue;
+    return [[GroupCallDisposable alloc] initWithBlock:^{
+        [queue dispatch:^{
+            __strong OngoingCallThreadLocalContextWebrtc *strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+
+            [strongSelf->_sinks removeObjectForKey:@(sinkId)];
+        }];
+    }];
+}
+
+
 - (void)makeIncomingVideoView:(void (^_Nonnull)(UIView<OngoingCallThreadLocalContextWebrtcVideoView> * _Nullable))completion {
     if (_tgVoip) {
         __weak OngoingCallThreadLocalContextWebrtc *weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if ([VideoMetalView isSupported]) {
-                VideoMetalView *remoteRenderer = [[VideoMetalView alloc] initWithFrame:CGRectZero];
+            VideoMetalView *remoteRenderer = [[VideoMetalView alloc] initWithFrame:CGRectZero];
 #if TARGET_OS_IPHONE
-                remoteRenderer.videoContentMode = UIViewContentModeScaleToFill;
+            remoteRenderer.videoContentMode = UIViewContentModeScaleToFill;
 #else
-                remoteRenderer.videoContentMode = UIViewContentModeScaleAspect;
+            remoteRenderer.videoContentMode = UIViewContentModeScaleAspect;
 #endif
-                
-                std::shared_ptr<rtc::VideoSinkInterface<webrtc::VideoFrame>> sink = [remoteRenderer getSink];
-                __strong OngoingCallThreadLocalContextWebrtc *strongSelf = weakSelf;
-                if (strongSelf) {
-                    [remoteRenderer setOrientation:strongSelf->_remoteVideoOrientation];
-                    strongSelf->_currentRemoteVideoRenderer = remoteRenderer;
-                    strongSelf->_tgVoip->setIncomingVideoOutput(sink);
-                }
-                
-                completion(remoteRenderer);
-            } else {
-                GLVideoView *remoteRenderer = [[GLVideoView alloc] initWithFrame:CGRectZero];
-                
-                std::shared_ptr<rtc::VideoSinkInterface<webrtc::VideoFrame>> sink = [remoteRenderer getSink];
-                __strong OngoingCallThreadLocalContextWebrtc *strongSelf = weakSelf;
-                if (strongSelf) {
-                    [remoteRenderer setOrientation:strongSelf->_remoteVideoOrientation];
-                    strongSelf->_currentRemoteVideoRenderer = remoteRenderer;
-                    strongSelf->_tgVoip->setIncomingVideoOutput(sink);
-                }
-                
-                completion(remoteRenderer);
+            
+            std::shared_ptr<rtc::VideoSinkInterface<webrtc::VideoFrame>> sink = [remoteRenderer getSink];
+            __strong OngoingCallThreadLocalContextWebrtc *strongSelf = weakSelf;
+            if (strongSelf) {
+                [remoteRenderer setOrientation:strongSelf->_remoteVideoOrientation];
+                strongSelf->_currentRemoteVideoRenderer = remoteRenderer;
+                strongSelf->_tgVoip->setIncomingVideoOutput(sink);
             }
+            
+            completion(remoteRenderer);
         });
     }
 }
@@ -1326,6 +1325,7 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
         _tgVoip->addExternalAudioSamples(std::move(samples));
     }
 }
+
 
 @end
 
@@ -1796,7 +1796,7 @@ private:
                 }];
 
                 completion(remoteRenderer, cloneRenderer);
-            } else if ([VideoMetalView isSupported]) {
+            } else {
                 VideoMetalView *remoteRenderer = [[VideoMetalView alloc] initWithFrame:CGRectZero];
 #ifdef WEBRTC_IOS
                 remoteRenderer.videoContentMode = UIViewContentModeScaleToFill;
@@ -1828,23 +1828,11 @@ private:
                 }];
                 
                 completion(remoteRenderer, cloneRenderer);
-            } else {
-                GLVideoView *remoteRenderer = [[GLVideoView alloc] initWithFrame:CGRectZero];
-             //   [remoteRenderer setVideoContentMode:kCAGravityResizeAspectFill];
-                std::shared_ptr<rtc::VideoSinkInterface<webrtc::VideoFrame>> sink = [remoteRenderer getSink];
-                
-                [queue dispatch:^{
-                    __strong GroupCallThreadLocalContext *strongSelf = weakSelf;
-                    if (strongSelf && strongSelf->_instance) {
-                        strongSelf->_instance->addIncomingVideoOutput(endpointId.UTF8String, sink);
-                    }
-                }];
-                
-                completion(remoteRenderer, nil);
             }
         });
     }
 }
+
 
 - (GroupCallDisposable * _Nonnull)addVideoOutputWithEndpointId:(NSString * _Nonnull)endpointId sink:(void (^_Nonnull)(CallVideoFrameData * _Nonnull))sink {
     int sinkId = _nextSinkId;

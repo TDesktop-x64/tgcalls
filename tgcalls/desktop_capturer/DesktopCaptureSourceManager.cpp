@@ -30,7 +30,6 @@ webrtc::DesktopCaptureOptions DesktopCaptureSourceManager::OptionsForType(
     auto result = webrtc::DesktopCaptureOptions::CreateDefault();
 #ifdef WEBRTC_WIN
     result.set_allow_directx_capturer(true);
-    result.set_allow_use_magnification_api(false);
 #elif defined WEBRTC_MAC
     result.set_allow_iosurface(type == DesktopCaptureType::Screen);
 #elif defined WEBRTC_USE_PIPEWIRE
@@ -43,6 +42,9 @@ webrtc::DesktopCaptureOptions DesktopCaptureSourceManager::OptionsForType(
 auto DesktopCaptureSourceManager::CreateForType(DesktopCaptureType type)
 -> std::unique_ptr<webrtc::DesktopCapturer> {
     const auto options = OptionsForType(type);
+    if (auto result = webrtc::DesktopCapturer::CreateGenericCapturer(options)) {
+        return result;
+    }
     return (type == DesktopCaptureType::Screen)
         ? webrtc::DesktopCapturer::CreateScreenCapturer(options)
         : webrtc::DesktopCapturer::CreateWindowCapturer(options);

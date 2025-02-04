@@ -44,7 +44,7 @@ static DarwinVideoTrackSource *getObjCVideoSource(const webrtc::scoped_refptr<we
     return static_cast<DarwinVideoTrackSource *>(proxy_source->internal());
 }
 
-static NSString *getPlatformInfo() {
+[[maybe_unused]] static NSString *getPlatformInfo() {
     const char *typeSpecifier = "hw.machine";
     
     size_t size;

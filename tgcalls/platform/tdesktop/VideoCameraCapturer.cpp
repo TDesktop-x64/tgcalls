@@ -7,6 +7,10 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 
+#ifdef WEBRTC_LINUX // Breaks compilation on MSVC because of ERROR define.
+#include <modules/video_capture/video_capture_options.h>
+#endif // WEBRTC_LINUX
+
 #include <stdint.h>
 #include <memory>
 #include <algorithm>
@@ -17,6 +21,19 @@ namespace {
 constexpr auto kPreferredWidth = 1280;
 constexpr auto kPreferredHeight = 720;
 constexpr auto kPreferredFps = 30;
+
+#ifdef WEBRTC_LINUX
+[[nodiscard]] webrtc::VideoCaptureOptions GetVideoCaptureOptions() {
+	auto result = webrtc::VideoCaptureOptions();
+	result.set_allow_v4l2(true);
+#ifdef WEBRTC_USE_PIPEWIRE
+	//result.set_allow_pipewire(true);
+	// This requires a call to result.Init(callback)
+	// and waiting for the callback to finish.
+#endif
+	return result;
+}
+#endif
 
 } // namespace
 
@@ -31,8 +48,18 @@ VideoCameraCapturer::~VideoCameraCapturer() {
 
 void VideoCameraCapturer::create() {
 	_failed = false;
-	const auto info = std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo>(
-		webrtc::VideoCaptureFactory::CreateDeviceInfo());
+
+#ifdef WEBRTC_LINUX
+	auto options = GetVideoCaptureOptions();
+	const auto info = std::unique_ptr<
+		webrtc::VideoCaptureModule::DeviceInfo
+	>(webrtc::VideoCaptureFactory::CreateDeviceInfo(&options));
+#else // WEBRTC_LINUX
+	const auto info = std::unique_ptr<
+		webrtc::VideoCaptureModule::DeviceInfo
+	>(webrtc::VideoCaptureFactory::CreateDeviceInfo());
+#endif // WEBRTC_LINUX
+
 	if (!info) {
 		failed();
 		return;
@@ -80,7 +107,14 @@ void VideoCameraCapturer::failed() {
 bool VideoCameraCapturer::create(
 		webrtc::VideoCaptureModule::DeviceInfo *info,
 		const std::string &deviceId) {
-	_module = webrtc::VideoCaptureFactory::Create(deviceId.c_str());
+	const auto deviceString = deviceId.c_str();
+#ifdef WEBRTC_LINUX
+	auto options = GetVideoCaptureOptions();
+	_module = webrtc::VideoCaptureFactory::Create(&options, deviceString);
+#else // WEBRTC_LINUX
+	_module = webrtc::VideoCaptureFactory::Create(deviceString);
+#endif // WEBRTC_LINUX
+
 	if (!_module) {
 		RTC_LOG(LS_ERROR)
 			<< "Failed to create VideoCameraCapturer '" << deviceId << "'.";

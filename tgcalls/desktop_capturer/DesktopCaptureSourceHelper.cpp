@@ -275,21 +275,23 @@ DesktopSourceRenderer::DesktopSourceRenderer(
 
 #ifdef WEBRTC_WIN
     options.set_allow_directx_capturer(true);
-    options.set_allow_use_magnification_api(false);
 #elif defined WEBRTC_MAC
     options.set_allow_iosurface(true);
 #elif defined WEBRTC_USE_PIPEWIRE
     options.set_allow_pipewire(true);
 #endif // WEBRTC_WIN || WEBRTC_MAC
 
-    if (source.isWindow()) {
-        _capturer = webrtc::DesktopCapturer::CreateWindowCapturer(options);
-    } else {
-        _capturer = webrtc::DesktopCapturer::CreateScreenCapturer(options);
-    }
+    _capturer = webrtc::DesktopCapturer::CreateGenericCapturer(options);
     if (!_capturer) {
-        _fatalError = true;
-        return;
+        if (source.isWindow()) {
+            _capturer = webrtc::DesktopCapturer::CreateWindowCapturer(options);
+        } else {
+            _capturer = webrtc::DesktopCapturer::CreateScreenCapturer(options);
+        }
+        if (!_capturer) {
+            _fatalError = true;
+            return;
+        }
     }
     if (data.captureMouse) {
         _capturer = std::make_unique<webrtc::DesktopAndCursorComposer>(
