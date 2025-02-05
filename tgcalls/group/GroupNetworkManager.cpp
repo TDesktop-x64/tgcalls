@@ -372,7 +372,14 @@ GroupNetworkManager::~GroupNetworkManager() {
 
 void GroupNetworkManager::resetDtlsSrtpTransport() {
     std::unique_ptr<cricket::BasicPortAllocator> portAllocator = std::make_unique<cricket::BasicPortAllocator>(_networkManager.get(), _socketFactory.get(), _turnCustomizer.get(), nullptr);
-    portAllocator->set_flags(portAllocator->flags());
+    
+    uint32_t flags = portAllocator->flags();
+    
+    flags |=
+        cricket::PORTALLOCATOR_ENABLE_IPV6 |
+        cricket::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
+    
+    portAllocator->set_flags(flags);
     portAllocator->Initialize();
 
     portAllocator->SetConfiguration({}, {}, 2, webrtc::NO_PRUNE, _turnCustomizer.get());
@@ -499,7 +506,7 @@ void GroupNetworkManager::setRemoteParams(PeerIceParameters const &remoteIcePara
     cricket::IceParameters parameters(
         remoteIceParameters.ufrag,
         remoteIceParameters.pwd,
-        false
+        true
     );
 
     _transportChannel->SetRemoteIceParameters(parameters);

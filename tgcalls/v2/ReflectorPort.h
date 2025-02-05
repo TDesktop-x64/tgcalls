@@ -42,6 +42,7 @@ public:
     // Create a TURN port using the shared UDP socket, `socket`.
     static std::unique_ptr<ReflectorPort> Create(
         const cricket::CreateRelayPortArgs& args,
+        rtc::SocketFactory *underlying_socket_factory,
         rtc::AsyncPacketSocket* socket,
         uint8_t serverId,
         int server_priority,
@@ -61,13 +62,14 @@ public:
             return nullptr;
         }
         // Using `new` to access a non-public constructor.
-        return absl::WrapUnique(new ReflectorPort(args, socket, serverId, server_priority, standaloneReflectorMode, standaloneReflectorRoleId));
+        return absl::WrapUnique(new ReflectorPort(args, underlying_socket_factory, socket, serverId, server_priority, standaloneReflectorMode, standaloneReflectorRoleId));
     }
     
     // Create a TURN port that will use a new socket, bound to `network` and
     // using a port in the range between `min_port` and `max_port`.
     static std::unique_ptr<ReflectorPort> Create(
         const cricket::CreateRelayPortArgs& args,
+        rtc::SocketFactory *underlying_socket_factory,
         uint16_t min_port,
         uint16_t max_port,
         uint8_t serverId,
@@ -88,7 +90,7 @@ public:
             return nullptr;
         }
         // Using `new` to access a non-public constructor.
-        return absl::WrapUnique(new ReflectorPort(args, min_port, max_port, serverId, server_priority, standaloneReflectorMode, standaloneReflectorRoleId));
+        return absl::WrapUnique(new ReflectorPort(args, underlying_socket_factory, min_port, max_port, serverId, server_priority, standaloneReflectorMode, standaloneReflectorRoleId));
     }
     
     ~ReflectorPort() override;
@@ -163,6 +165,7 @@ public:
     
 protected:
     ReflectorPort(const cricket::CreateRelayPortArgs& args,
+                  rtc::SocketFactory *underlying_socket_factory,
                   rtc::AsyncPacketSocket* socket,
                   uint8_t serverId,
                   int server_priority,
@@ -170,6 +173,7 @@ protected:
                   uint32_t standaloneReflectorRoleId);
     
     ReflectorPort(const cricket::CreateRelayPortArgs& args,
+                  rtc::SocketFactory *underlying_socket_factory,
                   uint16_t min_port,
                   uint16_t max_port,
                   uint8_t serverId,
@@ -219,6 +223,7 @@ private:
     AttemptedServerSet attempted_server_addresses_;
     
     rtc::AsyncPacketSocket* socket_;
+    rtc::SocketFactory *underlying_socket_factory_;
     SocketOptionsMap socket_options_;
     std::unique_ptr<webrtc::AsyncDnsResolverInterface> resolver_;
     int error_;

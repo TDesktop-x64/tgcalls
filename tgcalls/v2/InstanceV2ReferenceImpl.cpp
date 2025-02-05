@@ -449,8 +449,6 @@ public:
             _audioDeviceModule = createAudioDeviceModule();
         });
 
-        _relayPortFactory.reset(new ReflectorRelayPortFactory(_rtcServers, false, 0));
-
         webrtc::PeerConnectionFactoryDependencies peerConnectionFactoryDependencies;
         peerConnectionFactoryDependencies.signaling_thread = _threads->getMediaThread();
         peerConnectionFactoryDependencies.worker_thread = _threads->getWorkerThread();
@@ -1587,7 +1585,6 @@ private:
 
     std::unique_ptr<webrtc::RtcEventLogNull> _eventLog;
     std::unique_ptr<webrtc::TaskQueueFactory> _taskQueueFactory;
-    std::unique_ptr<cricket::RelayPortFactoryInterface> _relayPortFactory;
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> _peerConnectionFactory;
     std::unique_ptr<PeerConnectionDelegateAdapter> _peerConnectionObserver;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> _peerConnection;

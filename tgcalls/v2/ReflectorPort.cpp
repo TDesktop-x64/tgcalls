@@ -23,20 +23,89 @@
 #include "system_wrappers/include/field_trial.h"
 #include "rtc_base/byte_order.h"
 
+#include "RawTcpSocket.h"
+
 namespace tgcalls {
 
 namespace {
 
 rtc::CopyOnWriteBuffer parseHex(std::string const &string) {
     rtc::CopyOnWriteBuffer result;
-
+    
     for (size_t i = 0; i < string.length(); i += 2) {
         std::string byteString = string.substr(i, 2);
         char byte = (char)strtol(byteString.c_str(), NULL, 16);
         result.AppendData(&byte, 1);
     }
-
+    
     return result;
+}
+
+int BindSocket(rtc::Socket* socket,
+               const rtc::SocketAddress& local_address,
+               uint16_t min_port,
+               uint16_t max_port) {
+    int ret = -1;
+    if (min_port == 0 && max_port == 0) {
+        // If there's no port range, let the OS pick a port for us.
+        ret = socket->Bind(local_address);
+    } else {
+        // Otherwise, try to find a port in the provided range.
+        for (int port = min_port; ret < 0 && port <= max_port; ++port) {
+            ret = socket->Bind(rtc::SocketAddress(local_address.ipaddr(), port));
+        }
+    }
+    return ret;
+}
+
+rtc::AsyncPacketSocket *CreateClientRawTcpSocket(
+                                              rtc::SocketFactory *socket_factory_,
+                                              const rtc::SocketAddress& local_address,
+                                              const rtc::SocketAddress& remote_address,
+                                              const rtc::ProxyInfo& proxy_info,
+                                              const std::string& user_agent,
+                                              const rtc::PacketSocketTcpOptions& tcp_options) {
+    rtc::Socket* socket =
+    socket_factory_->CreateSocket(local_address.family(), SOCK_STREAM);
+    if (!socket) {
+        return NULL;
+    }
+    
+    if (BindSocket(socket, local_address, 0, 0) < 0) {
+        // Allow BindSocket to fail if we're binding to the ANY address, since this
+        // is mostly redundant in the first place. The socket will be bound when we
+        // call Connect() instead.
+        if (local_address.IsAnyIP()) {
+            RTC_LOG(LS_WARNING) << "TCP bind failed with error " << socket->GetError()
+            << "; ignoring since socket is using 'any' address.";
+        } else {
+            RTC_LOG(LS_ERROR) << "TCP bind failed with error " << socket->GetError();
+            delete socket;
+            return NULL;
+        }
+    }
+    
+    // Set TCP_NODELAY (via OPT_NODELAY) for improved performance; this causes
+    // small media packets to be sent immediately rather than being buffered up,
+    // reducing latency.
+    //
+    // Must be done before calling Connect, otherwise it may fail.
+    if (socket->SetOption(rtc::Socket::OPT_NODELAY, 1) != 0) {
+        RTC_LOG(LS_ERROR) << "Setting TCP_NODELAY option failed with error "
+        << socket->GetError();
+    }
+    
+    if (socket->Connect(remote_address) < 0) {
+        RTC_LOG(LS_ERROR) << "TCP connect failed with error " << socket->GetError();
+        delete socket;
+        return NULL;
+    }
+    
+    // Finally, wrap that socket in a TCP or STUN TCP packet socket.
+    rtc::AsyncPacketSocket* tcp_socket;
+    tcp_socket = new rtc::RawTcpSocket(socket);
+    
+    return tcp_socket;
 }
 
 }
@@ -54,6 +123,7 @@ static int GetRelayPreference(cricket::ProtocolType proto) {
 }
 
 ReflectorPort::ReflectorPort(const cricket::CreateRelayPortArgs& args,
+                             rtc::SocketFactory *underlying_socket_factory,
                              rtc::AsyncPacketSocket* socket,
                              uint8_t serverId,
                              int server_priority,
@@ -68,6 +138,7 @@ ReflectorPort::ReflectorPort(const cricket::CreateRelayPortArgs& args,
 server_address_(*args.server_address),
 credentials_(args.config->credentials),
 socket_(socket),
+underlying_socket_factory_(underlying_socket_factory),
 error_(0),
 stun_dscp_value_(rtc::DSCP_NO_CHANGE),
 state_(STATE_CONNECTING),
@@ -75,8 +146,6 @@ server_priority_(server_priority),
 standaloneReflectorMode_(standaloneReflectorMode),
 standaloneReflectorRoleId_(standaloneReflectorRoleId) {
     serverId_ = serverId;
-    auto rawPeerTag = parseHex(args.config->credentials.password);
-    peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
     
     if (standaloneReflectorMode_) {
         randomTag_ = standaloneReflectorRoleId_;
@@ -87,10 +156,14 @@ standaloneReflectorRoleId_(standaloneReflectorRoleId) {
             randomTag_ = distribution(generator);
         } while (!randomTag_);
     }
+    
+    auto rawPeerTag = parseHex(args.config->credentials.password);
+    peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
     peer_tag_.AppendData((uint8_t *)&randomTag_, 4);
 }
 
 ReflectorPort::ReflectorPort(const cricket::CreateRelayPortArgs& args,
+                             rtc::SocketFactory *underlying_socket_factory,
                              uint16_t min_port,
                              uint16_t max_port,
                              uint8_t serverId,
@@ -108,6 +181,7 @@ ReflectorPort::ReflectorPort(const cricket::CreateRelayPortArgs& args,
 server_address_(*args.server_address),
 credentials_(args.config->credentials),
 socket_(NULL),
+underlying_socket_factory_(underlying_socket_factory),
 error_(0),
 stun_dscp_value_(rtc::DSCP_NO_CHANGE),
 state_(STATE_CONNECTING),
@@ -116,9 +190,6 @@ standaloneReflectorMode_(standaloneReflectorMode),
 standaloneReflectorRoleId_(standaloneReflectorRoleId) {
     serverId_ = serverId;
 
-    auto rawPeerTag = parseHex(args.config->credentials.password);
-    peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
-    
     if (standaloneReflectorMode_) {
         randomTag_ = standaloneReflectorRoleId_;
     } else {
@@ -128,6 +199,9 @@ standaloneReflectorRoleId_(standaloneReflectorRoleId) {
             randomTag_ = distribution(generator);
         } while (!randomTag_);
     }
+    
+    auto rawPeerTag = parseHex(args.config->credentials.password);
+    peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
     peer_tag_.AppendData((uint8_t *)&randomTag_, 4);
 }
 
@@ -142,6 +216,10 @@ ReflectorPort::~ReflectorPort() {
 
     if (!SharedSocket()) {
         delete socket_;
+    }
+    
+    if (server_address_.proto == cricket::PROTO_TCP) {
+        socket_->UnsubscribeCloseEvent(this);
     }
 }
 
@@ -223,23 +301,36 @@ void ReflectorPort::SendReflectorHello() {
     << ToString()
     << ": REFLECTOR sending ping to " << server_address_.address.ToString();
 
-    rtc::ByteBufferWriter bufferWriter;
-    bufferWriter.WriteBytes((const uint8_t *)peer_tag_.data(), peer_tag_.size());
-    for (int i = 0; i < 12; i++) {
-        bufferWriter.WriteUInt8(0xffu);
+    if (server_address_.proto == cricket::PROTO_TCP) {
+        rtc::ByteBufferWriter bufferWriter;
+        bufferWriter.WriteBytes((const uint8_t *)peer_tag_.data(), peer_tag_.size());
+        bufferWriter.WriteUInt32(0);
+        
+        while (bufferWriter.Length() % 4 != 0) {
+            bufferWriter.WriteUInt8(0);
+        }
+        
+        rtc::PacketOptions options;
+        Send(bufferWriter.Data(), bufferWriter.Length(), options);
+    } else {
+        rtc::ByteBufferWriter bufferWriter;
+        bufferWriter.WriteBytes((const uint8_t *)peer_tag_.data(), peer_tag_.size());
+        for (int i = 0; i < 12; i++) {
+            bufferWriter.WriteUInt8(0xffu);
+        }
+        bufferWriter.WriteUInt8(0xfeu);
+        for (int i = 0; i < 3; i++) {
+            bufferWriter.WriteUInt8(0xffu);
+        }
+        bufferWriter.WriteUInt64(123);
+        
+        while (bufferWriter.Length() % 4 != 0) {
+            bufferWriter.WriteUInt8(0);
+        }
+        
+        rtc::PacketOptions options;
+        Send(bufferWriter.Data(), bufferWriter.Length(), options);
     }
-    bufferWriter.WriteUInt8(0xfeu);
-    for (int i = 0; i < 3; i++) {
-        bufferWriter.WriteUInt8(0xffu);
-    }
-    bufferWriter.WriteUInt64(123);
-
-    while (bufferWriter.Length() % 4 != 0) {
-        bufferWriter.WriteUInt8(0);
-    }
-
-    rtc::PacketOptions options;
-    Send(bufferWriter.Data(), bufferWriter.Length(), options);
 
     if (!is_running_ping_task_) {
         is_running_ping_task_ = true;
@@ -269,13 +360,14 @@ bool ReflectorPort::CreateReflectorClientSocket() {
         }
     } else if (server_address_.proto == cricket::PROTO_TCP) {
         RTC_DCHECK(!SharedSocket());
-        int opts = rtc::PacketSocketFactory::OPT_STUN;
+        int opts = 0;
 
         rtc::PacketSocketTcpOptions tcp_options;
         tcp_options.opts = opts;
-        socket_ = socket_factory()->CreateClientTcpSocket(
-                                                          rtc::SocketAddress(Network()->GetBestIP(), 0), server_address_.address,
-                                                          proxy(), user_agent(), tcp_options);
+        socket_ = CreateClientRawTcpSocket(
+            underlying_socket_factory_,
+            rtc::SocketAddress(Network()->GetBestIP(), 0), server_address_.address,
+            proxy(), user_agent(), tcp_options);
     }
 
     if (!socket_) {
@@ -372,7 +464,32 @@ void ReflectorPort::OnSocketConnect(rtc::AsyncPacketSocket* socket) {
     << socket->GetRemoteAddress().ToSensitiveString()
     << " using tcp.";
 
-    //TODO: Initiate server ping
+    if (server_address_.proto == cricket::PROTO_TCP && state_ != STATE_READY) {
+        state_ = STATE_READY;
+
+        RTC_LOG(LS_INFO)
+        << ToString()
+        << ": REFLECTOR " << server_address_.address.ToString() << " is now ready";
+        
+        const auto ipFormat = "reflector-" + std::to_string((uint32_t)serverId_) + "-" + std::to_string(randomTag_) + ".reflector";
+        rtc::SocketAddress candidateAddress(ipFormat, server_address_.address.port());
+        if (standaloneReflectorMode_) {
+            candidateAddress.SetResolvedIP(server_address_.address.ipaddr());
+        }
+        
+        // For relayed candidate, Base is the candidate itself.
+        AddAddress(candidateAddress,          // Candidate address.
+                   server_address_.address,          // Base address.
+                   rtc::SocketAddress(),  // Related address.
+                   cricket::UDP_PROTOCOL_NAME,
+                   ProtoToString(server_address_.proto),  // The first hop protocol.
+                   "",  // TCP canddiate type, empty for turn candidates.
+                   cricket::RELAY_PORT_TYPE, GetRelayPreference(server_address_.proto),
+                   server_priority_, ReconstructedServerUrl(false /* use_hostname */),
+                   true);
+        
+        SendReflectorHello();
+    }
 }
 
 void ReflectorPort::OnSocketClose(rtc::AsyncPacketSocket* socket, int error) {
@@ -380,7 +497,7 @@ void ReflectorPort::OnSocketClose(rtc::AsyncPacketSocket* socket, int error) {
     << ": Connection with server failed with error: "
     << error;
     RTC_DCHECK(socket == socket_);
-    Close();
+    //Close();
 }
 
 cricket::Connection* ReflectorPort::CreateConnection(const cricket::Candidate& remote_candidate,
@@ -405,8 +522,15 @@ cricket::Connection* ReflectorPort::CreateConnection(const cricket::Candidate& r
     if (state_ == STATE_DISCONNECTED || state_ == STATE_RECEIVEONLY) {
         return nullptr;
     }
+    
+    cricket::Candidate updated_remote_candidate = remote_candidate;
+    if (server_address_.proto == cricket::PROTO_TCP) {
+        rtc::SocketAddress updated_address = updated_remote_candidate.address();
+        updated_address.SetResolvedIP(server_address_.address.ipaddr());
+        updated_remote_candidate.set_address(updated_address);
+    }
 
-    cricket::ProxyConnection* conn = new cricket::ProxyConnection(NewWeakPtr(), 0, remote_candidate);
+    cricket::ProxyConnection* conn = new cricket::ProxyConnection(NewWeakPtr(), 0, updated_remote_candidate);
     AddOrReplaceConnection(conn);
 
     return conn;
@@ -492,10 +616,10 @@ int ReflectorPort::SendTo(const void* data,
 
         resolved_peer_tags_by_hostname_.insert(std::make_pair(syntheticHostname, resolvedPeerTag));
     }
-
+    
     targetPeerTag.AppendData(peer_tag_.data(), peer_tag_.size() - 4);
     targetPeerTag.AppendData((uint8_t *)&resolvedPeerTag, 4);
-
+    
     rtc::ByteBufferWriter bufferWriter;
     bufferWriter.WriteBytes((const uint8_t *)targetPeerTag.data(), targetPeerTag.size());
     
@@ -507,14 +631,14 @@ int ReflectorPort::SendTo(const void* data,
     while (bufferWriter.Length() % 4 != 0) {
         bufferWriter.WriteUInt8(0);
     }
-
+    
     rtc::PacketOptions modified_options(options);
     CopyPortInformationToPacketInfo(&modified_options.info_signaled_after_sent);
-
+    
     modified_options.info_signaled_after_sent.turn_overhead_bytes = bufferWriter.Length() - size;
-
+    
     Send(bufferWriter.Data(), bufferWriter.Length(), modified_options);
-
+    
     return static_cast<int>(size);
 }
 
@@ -534,12 +658,6 @@ bool ReflectorPort::HandleIncomingPacket(rtc::AsyncPacketSocket* socket, rtc::Re
     size_t size = packet.payload().size();
     rtc::SocketAddress const &remote_addr = packet.source_address();
     auto packet_time_us = packet.arrival_time();
-    
-    /*
-    const char* data,
-    size_t size,
-    const rtc::SocketAddress& remote_addr,
-    int64_t packet_time_us*/
     
     // This is to guard against a STUN response from previous server after
     // alternative server redirection. TODO(guoweis): add a unit test for this

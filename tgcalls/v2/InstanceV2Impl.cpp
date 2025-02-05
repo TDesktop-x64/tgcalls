@@ -63,6 +63,7 @@
 #include "SignalingConnection.h"
 #include "ExternalSignalingConnection.h"
 #include "SignalingSctpConnection.h"
+#include "SignalingKcpConnection.h"
 #include "utils/gzip.h"
 
 namespace tgcalls {
@@ -913,7 +914,6 @@ class InstanceV2ImplInternal : public std::enable_shared_from_this<InstanceV2Imp
 public:
     InstanceV2ImplInternal(Descriptor &&descriptor, std::shared_ptr<Threads> threads) :
     _webrtcEnvironment(webrtc::EnvironmentFactory().Create()),
-    _signalingProtocolVersion(signalingProtocolVersion(descriptor.version)),
     _threads(threads),
     _rtcServers(descriptor.rtcServers),
     _proxy(std::move(descriptor.proxy)),
@@ -949,6 +949,11 @@ public:
                 _customParameters = customParametersJson.object_items();
             }
         }
+        
+        _signalingProtocolVersion = signalingProtocolVersion(descriptor.version);
+        if (getCustomParameterBool(_customParameters, "network_kcp_experiment")) {
+            _signalingProtocolVersion = SignalingProtocolVersion::V3;
+        }
     }
 
     ~InstanceV2ImplInternal() {
@@ -982,8 +987,25 @@ public:
 
         const auto weak = std::weak_ptr<InstanceV2ImplInternal>(shared_from_this());
 
-        if (_signalingProtocolVersion == SignalingProtocolVersion::V3) {
-            _signalingConnection = std::make_unique<SignalingSctpConnection>(
+        if (getCustomParameterBool(_customParameters, "network_kcp_experiment")) {
+            _signalingConnection = std::make_shared<SignalingKcpConnection>(
+                _threads,
+                [threads = _threads, weak](const std::vector<uint8_t> &data) {
+                    threads->getMediaThread()->PostTask([weak, data] {
+                        const auto strong = weak.lock();
+                        if (!strong) {
+                            return;
+                        }
+
+                        strong->onSignalingData(data);
+                    });
+                },
+                [signalingDataEmitted = _signalingDataEmitted](const std::vector<uint8_t> &data) {
+                    signalingDataEmitted(data);
+                }
+            );
+        } else if (_signalingProtocolVersion == SignalingProtocolVersion::V3) {
+            _signalingConnection = std::make_shared<SignalingSctpConnection>(
                 _threads,
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
                     threads->getMediaThread()->PostTask([weak, data] {
@@ -1001,7 +1023,7 @@ public:
             );
         }
         if (!_signalingConnection) {
-            _signalingConnection = std::make_unique<ExternalSignalingConnection>(
+            _signalingConnection = std::make_shared<ExternalSignalingConnection>(
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
                     threads->getMediaThread()->PostTask([weak, data] {
                         const auto strong = weak.lock();
@@ -1210,8 +1232,7 @@ public:
             auto stats = strong->_call->GetStats();
             float sendBitrateKbps = ((float)stats.send_bandwidth_bps / 1000.0f);
 
-            strong->_threads->getMediaThread()->PostTask([weak, sendBitrateKbps]() {
-                auto strong = weak.lock();
+            strong->_threads->getMediaThread()->PostTask([strong = std::move(strong), sendBitrateKbps]() mutable {
                 if (!strong) {
                     return;
                 }
@@ -1233,6 +1254,8 @@ public:
                 networkBitrateLogRecord.bitrate = (int32_t)sendBitrateKbps;
 
                 strong->_networkBitrateLogRecords.emplace_back(rtc::TimeMillis(), std::move(networkBitrateLogRecord));
+                
+                strong.reset();
             });
         });
     }
@@ -2163,7 +2186,7 @@ private:
 
 private:
     webrtc::Environment _webrtcEnvironment;
-    SignalingProtocolVersion _signalingProtocolVersion;
+    SignalingProtocolVersion _signalingProtocolVersion = SignalingProtocolVersion::V3;
     std::shared_ptr<Threads> _threads;
     std::vector<RtcServer> _rtcServers;
     std::unique_ptr<Proxy> _proxy;
@@ -2183,7 +2206,7 @@ private:
     
     std::map<std::string, json11::Json> _customParameters;
 
-    std::unique_ptr<SignalingConnection> _signalingConnection;
+    std::shared_ptr<SignalingConnection> _signalingConnection;
     std::unique_ptr<EncryptedConnection> _signalingEncryptedConnection;
 
     int64_t _startTimestamp = 0;

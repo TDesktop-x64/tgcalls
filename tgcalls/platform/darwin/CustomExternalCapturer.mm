@@ -51,8 +51,11 @@ static tgcalls::DarwinVideoTrackSource *getObjCVideoSource(const webrtc::scoped_
 - (void)dealloc {
 }
 
-+ (void)passPixelBuffer:(CVPixelBufferRef)pixelBuffer rotation:(RTCVideoRotation)rotation toSource:(webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>)source croppingBuffer:(std::vector<uint8_t> &)croppingBuffer {
++ (void)passPixelBuffer:(CVPixelBufferRef)pixelBuffer sampleBufferReference:(CMSampleBufferRef)sampleBufferReference rotation:(RTCVideoRotation)rotation toSource:(webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>)source croppingBuffer:(std::vector<uint8_t> &)croppingBuffer {
     TGRTCCVPixelBuffer *rtcPixelBuffer = [[TGRTCCVPixelBuffer alloc] initWithPixelBuffer:pixelBuffer];
+    if (sampleBufferReference) {
+        [rtcPixelBuffer storeSampleBufferReference:sampleBufferReference];
+    }
     rtcPixelBuffer.deviceRelativeVideoRotation = -1;
 
     int width = rtcPixelBuffer.width;
@@ -85,4 +88,3 @@ static tgcalls::DarwinVideoTrackSource *getObjCVideoSource(const webrtc::scoped_
 }
 
 @end
-
