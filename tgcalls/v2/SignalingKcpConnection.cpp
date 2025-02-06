@@ -1,7 +1,10 @@
 #include "v2/SignalingKcpConnection.h"
 
 #include <random>
+
+#ifndef _MSC_VER
 #include <sys/time.h>
+#endif
 
 #include "rtc_base/async_tcp_socket.h"
 #include "p2p/base/basic_packet_socket_factory.h"
@@ -13,10 +16,24 @@
 
 /* get system time */
 static inline void itimeofday(long *sec, long *usec) {
+#ifdef _MSC_VER
+    SYSTEMTIME  system_time;
+    FILETIME    file_time;
+    uint64_t    time;
+
+    GetSystemTime( &system_time );
+    SystemTimeToFileTime( &system_time, &file_time );
+    time =  ((uint64_t)file_time.dwLowDateTime )      ;
+    time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+    if (sec) *sec  = (long) ((time - EPOCH) / 10000000L);
+    if (usec) *usec = (long) (system_time.wMilliseconds * 1000);
+#else
     struct timeval time;
     gettimeofday(&time, NULL);
     if (sec) *sec = time.tv_sec;
     if (usec) *usec = time.tv_usec;
+#endif
 }
 
 /* get clock in millisecond 64 */

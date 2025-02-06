@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <optional>
 
 #include "../Instance.h"
 
