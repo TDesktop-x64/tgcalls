@@ -928,6 +928,7 @@ public:
     _remotePrefferedAspectRatioUpdated(descriptor.remotePrefferedAspectRatioUpdated),
     _signalingDataEmitted(descriptor.signalingDataEmitted),
     _createAudioDeviceModule(descriptor.createAudioDeviceModule),
+    _createWrappedAudioDeviceModule(descriptor.createWrappedAudioDeviceModule),
     _devicesConfig(descriptor.mediaDevicesConfig),
     _statsLogPath(descriptor.config.statsLogPath),
     _eventLog(std::make_unique<webrtc::RtcEventLogNull>()),
@@ -2176,6 +2177,12 @@ private:
         const auto check = [&](const webrtc::scoped_refptr<webrtc::AudioDeviceModule> &result) {
             return (result && result->Init() == 0) ? result : nullptr;
         };
+        if (_createWrappedAudioDeviceModule) {
+            auto result = _createWrappedAudioDeviceModule(_taskQueueFactory.get());
+            if (result) {
+                return result;
+            }
+        }
         if (_createAudioDeviceModule) {
             if (const auto result = check(_createAudioDeviceModule(_taskQueueFactory.get()))) {
                 return result;
@@ -2201,6 +2208,7 @@ private:
     std::function<void(float)> _remotePrefferedAspectRatioUpdated;
     std::function<void(const std::vector<uint8_t> &)> _signalingDataEmitted;
     std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> _createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> _createWrappedAudioDeviceModule;
     MediaDevicesConfig _devicesConfig;
     FilePath _statsLogPath;
     

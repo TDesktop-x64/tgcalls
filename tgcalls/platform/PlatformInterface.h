@@ -300,7 +300,7 @@ public:
     }
 #endif  // WEBRTC_IOS
 
-    webrtc::scoped_refptr<webrtc::AudioDeviceModule> WrappedInstance() {
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> WrappedInstance() const {
         return _impl;
     }
 

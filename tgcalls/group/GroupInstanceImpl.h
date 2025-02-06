@@ -12,6 +12,8 @@
 #include "../StaticThreads.h"
 #include "GroupJoinPayload.h"
 
+#include "platform/PlatformInterface.h"
+
 namespace webrtc {
 class AudioDeviceModule;
 class TaskQueueFactory;
@@ -163,6 +165,7 @@ struct GroupInstanceDescriptor {
     bool useDummyChannel{true};
     bool disableIncomingChannels{false};
     std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> createWrappedAudioDeviceModule;
     std::shared_ptr<VideoCaptureInterface> videoCapture; // deprecated
     std::function<webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>()> getVideoSource;
     std::function<std::shared_ptr<BroadcastPartTask>(std::function<void(int64_t)>)> requestCurrentTime;

@@ -10,6 +10,8 @@
 #include "Stats.h"
 #include "DirectConnectionChannel.h"
 
+#include "platform/PlatformInterface.h"
+
 namespace rtc {
 template <typename VideoFrameT>
 class VideoSinkInterface;
@@ -236,6 +238,7 @@ struct Descriptor {
     std::function<void(float)> remotePrefferedAspectRatioUpdated;
 	std::function<void(const std::vector<uint8_t> &)> signalingDataEmitted;
 	std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> createWrappedAudioDeviceModule;
     std::string initialInputDeviceId;
     std::string initialOutputDeviceId;
     std::shared_ptr<DirectConnectionChannel> directConnectionChannel;

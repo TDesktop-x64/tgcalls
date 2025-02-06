@@ -1823,6 +1823,7 @@ public:
     _webrtcEnvironment(webrtc::EnvironmentFactory().Create()),
     _netEqFactory(createNetEqFactory()),
     _createAudioDeviceModule(descriptor.createAudioDeviceModule),
+    _createWrappedAudioDeviceModule(descriptor.createWrappedAudioDeviceModule),
     _initialInputDeviceId(std::move(descriptor.initialInputDeviceId)),
     _initialOutputDeviceId(std::move(descriptor.initialOutputDeviceId)),
     _missingPacketBuffer(50),
@@ -3990,6 +3991,12 @@ private:
                 return nullptr;
             }
         };
+        if (_createWrappedAudioDeviceModule) {
+            auto result = _createWrappedAudioDeviceModule(&_webrtcEnvironment.task_queue_factory());
+            if (result) {
+                return result;
+            }
+        }
         if (_createAudioDeviceModule) {
             if (const auto result = check(_createAudioDeviceModule(&_webrtcEnvironment.task_queue_factory()))) {
                 return result;
@@ -4047,6 +4054,7 @@ private:
     std::shared_ptr<AudioDeviceDataObserverShared> _audioDeviceDataObserverShared;
     webrtc::scoped_refptr<WrappedAudioDeviceModule> _audioDeviceModule;
     std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> _createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> _createWrappedAudioDeviceModule;
     std::string _initialInputDeviceId;
     std::string _initialOutputDeviceId;
 
