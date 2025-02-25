@@ -39,6 +39,9 @@
 #include "api/rtc_event_log/rtc_event_log_factory.h"
 #include "api/stats/rtc_stats_report.h"
 #include "api/enable_media.h"
+#include "p2p/client/basic_port_allocator.h"
+#include "p2p/base/basic_packet_socket_factory.h"
+#include "rtc_base/network.h"
 
 #include "AudioFrame.h"
 #include "ThreadLocalObject.h"
@@ -54,6 +57,7 @@
 #include "v2/SignalingConnection.h"
 #include "v2/ExternalSignalingConnection.h"
 #include "v2/SignalingSctpConnection.h"
+#include "v2/ReflectorRelayPortFactory.h"
 #ifdef WEBRTC_IOS
 #include "platform/darwin/iOS/tgcalls_audio_device_module_ios.h"
 #endif
@@ -370,6 +374,7 @@ public:
     _remotePrefferedAspectRatioUpdated(descriptor.remotePrefferedAspectRatioUpdated),
     _signalingDataEmitted(descriptor.signalingDataEmitted),
     _createAudioDeviceModule(descriptor.createAudioDeviceModule),
+    _createWrappedAudioDeviceModule(descriptor.createWrappedAudioDeviceModule),
     _statsLogPath(descriptor.config.statsLogPath),
     _eventLog(std::make_unique<webrtc::RtcEventLogNull>()),
     _taskQueueFactory(webrtc::CreateDefaultTaskQueueFactory()),
@@ -450,6 +455,7 @@ public:
         });
 
         webrtc::PeerConnectionFactoryDependencies peerConnectionFactoryDependencies;
+        peerConnectionFactoryDependencies.network_thread = _threads->getNetworkThread();
         peerConnectionFactoryDependencies.signaling_thread = _threads->getMediaThread();
         peerConnectionFactoryDependencies.worker_thread = _threads->getWorkerThread();
         peerConnectionFactoryDependencies.task_queue_factory = webrtc::CreateDefaultTaskQueueFactory();
@@ -618,6 +624,14 @@ public:
         _peerConnectionObserver = std::make_unique<PeerConnectionDelegateAdapter>(std::move(delegateParameters));
 
         peerConnectionDependencies.observer = _peerConnectionObserver.get();
+        
+        _networkMonitorFactory = PlatformInterface::SharedInstance()->createNetworkMonitorFactory();
+        _socketFactory = std::make_unique<rtc::BasicPacketSocketFactory>(_threads->getNetworkThread()->socketserver());
+        _networkManager = std::make_unique<rtc::BasicNetworkManager>(_networkMonitorFactory.get(), _threads->getNetworkThread()->socketserver());
+        _relayPortFactory = std::make_unique<ReflectorRelayPortFactory>(_rtcServers, false, 0, _threads->getNetworkThread()->socketserver());
+        
+        auto portAllocator = std::make_unique<cricket::BasicPortAllocator>(_networkManager.get(), _socketFactory.get(), nullptr, _relayPortFactory.get());
+        peerConnectionDependencies.allocator = std::move(portAllocator);
 
         webrtc::PeerConnectionInterface::RTCConfiguration peerConnectionConfiguration;
         if (_enableP2P) {
@@ -1302,7 +1316,7 @@ public:
             } else {
                 _videoCapture = videoCapture;
 
-                auto videoTrack = _peerConnectionFactory->CreateVideoTrack("1", videoCaptureImpl->source().get());
+                auto videoTrack = _peerConnectionFactory->CreateVideoTrack(videoCaptureImpl->source(), "1");
                 if (videoTrack) {
                     webrtc::RtpTransceiverInit transceiverInit;
                     transceiverInit.stream_ids = { "0" };
@@ -1315,9 +1329,9 @@ public:
                         auto currentCapabilities = _peerConnectionFactory->GetRtpSenderCapabilities(cricket::MediaType::MEDIA_TYPE_VIDEO);
 
                         std::vector<std::string> codecPreferences = {
-                #ifndef WEBRTC_DISABLE_H265
+                            #ifndef WEBRTC_DISABLE_H265
                             cricket::kH265CodecName,
-                #endif
+                            #endif
                             cricket::kH264CodecName
                         };
 
@@ -1527,6 +1541,12 @@ private:
         const auto check = [&](const webrtc::scoped_refptr<webrtc::AudioDeviceModule> &result) {
             return (result && result->Init() == 0) ? result : nullptr;
         };
+        if (_createWrappedAudioDeviceModule) {
+            auto result = _createWrappedAudioDeviceModule(_taskQueueFactory.get());
+            if (result) {
+                return result;
+            }
+        }
         if (_createAudioDeviceModule) {
             if (const auto result = check(_createAudioDeviceModule(_taskQueueFactory.get()))) {
                 return result;
@@ -1550,6 +1570,7 @@ private:
     std::function<void(float)> _remotePrefferedAspectRatioUpdated;
     std::function<void(const std::vector<uint8_t> &)> _signalingDataEmitted;
     std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> _createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> _createWrappedAudioDeviceModule;
     FilePath _statsLogPath;
 
     std::unique_ptr<SignalingConnection> _signalingConnection;
@@ -1585,6 +1606,12 @@ private:
 
     std::unique_ptr<webrtc::RtcEventLogNull> _eventLog;
     std::unique_ptr<webrtc::TaskQueueFactory> _taskQueueFactory;
+    
+    std::unique_ptr<rtc::NetworkMonitorFactory> _networkMonitorFactory;
+    std::unique_ptr<rtc::BasicPacketSocketFactory> _socketFactory;
+    std::unique_ptr<rtc::BasicNetworkManager> _networkManager;
+    std::unique_ptr<cricket::RelayPortFactoryInterface> _relayPortFactory;
+    
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> _peerConnectionFactory;
     std::unique_ptr<PeerConnectionDelegateAdapter> _peerConnectionObserver;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> _peerConnection;
