@@ -1006,7 +1006,7 @@ public:
                     signalingDataEmitted(data);
                 }
             );
-        } else if (_signalingProtocolVersion == SignalingProtocolVersion::V3) {
+        } else if (_signalingProtocolVersion == SignalingProtocolVersion::V3 && !getCustomParameterBool(_customParameters, "network_signaling_nosctp")) {
             _signalingConnection = std::make_shared<SignalingSctpConnection>(
                 _threads,
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
