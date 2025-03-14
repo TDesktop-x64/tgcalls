@@ -488,8 +488,10 @@ public:
                     return;
                 }
 
-                if (strong->_didBeginNegotiation && !strong->_isPerformingConfiguration) {
-                    strong->sendLocalDescription();
+                if (strong->_didBeginNegotiation) {
+                    if (strong->_encryptionKey.isOutgoing || strong->_peerConnection->remote_description()) {
+                        strong->sendLocalDescription();
+                    }
                 } else {
                     RTC_LOG(LS_INFO) << "onRenegotiationNeeded: not sending local description";
                 }
@@ -882,9 +884,11 @@ public:
                     return;
                 }
 
-                strong->sentLocalDescription();
+                strong->doSendLocalDescription();
 
                 strong->_isMakingOffer = false;
+
+                strong->maybeCommitPendingIceCandidates();
             });
         }));
         RTC_LOG(LS_INFO) << "Calling SetLocalDescription";
@@ -906,7 +910,7 @@ public:
         sendRawSignalingMessage(std::vector<uint8_t>(jsonResult.begin(), jsonResult.end()));
     }
 
-    void sentLocalDescription() {
+    void doSendLocalDescription() {
         auto localDescription = _peerConnection->local_description();
         if (localDescription) {
             std::string sdp;
@@ -924,8 +928,9 @@ public:
     }
 
     void beginSignaling() {
+        _didBeginNegotiation = true;
+        
         if (_encryptionKey.isOutgoing) {
-            _didBeginNegotiation = true;
             sendLocalDescription();
         }
     }
@@ -1008,14 +1013,7 @@ public:
                 return;
             }
             std::string sdp = jsonSdp->second.string_value();
-
-            bool offerCollision = (type == "offer") && (_isMakingOffer || _peerConnection->signaling_state() != webrtc::PeerConnectionInterface::SignalingState::kStable);
-            bool ignoreOffer = _encryptionKey.isOutgoing && offerCollision;
-            if (ignoreOffer) {
-                return;
-            } else {
-                applyRemoteSdp(type, sdp);
-            }
+            handleRemoteSdp(type, sdp);
         } else if (type == "candidate") {
             auto jsonMid = json.object_items().find("mid");
             if (jsonMid == json.object_items().end()) {
@@ -1038,11 +1036,8 @@ public:
                 std::unique_ptr<webrtc::IceCandidateInterface> candidarePtr;
                 candidarePtr.reset(iceCandidate);
 
-                if (_handshakeCompleted) {
-                    _peerConnection->AddIceCandidate(candidarePtr.get());
-                } else {
-                    _pendingIceCandidates.push_back(std::move(candidarePtr));
-                }
+                _pendingIceCandidates.push_back(std::move(candidarePtr));
+                maybeCommitPendingIceCandidates();
             }
         } else {
             const auto message = signaling::Message::parse(data);
@@ -1114,10 +1109,25 @@ public:
             }
         }
     }
-
-    void applyRemoteSdp(std::string const &type, std::string const &sdp) {
+    
+    void handleRemoteSdp(std::string const &type, std::string const &sdp) {
         webrtc::SdpParseError sdpParseError;
         std::unique_ptr<webrtc::SessionDescriptionInterface> remoteDescription(webrtc::CreateSessionDescription(type, sdp, &sdpParseError));
+        if (!remoteDescription) {
+            RTC_LOG(LS_ERROR) << "Failed to parse remote SDP";
+            return;
+        }
+
+        bool isReadyForOffer = !_isMakingOffer && (_peerConnection->signaling_state() == webrtc::PeerConnectionInterface::SignalingState::kStable || _isSettingRemoteAnswerPending);
+        bool isOfferCollision = (type == "offer") && !isReadyForOffer;
+        bool ignoreOffer = !_encryptionKey.isOutgoing && isOfferCollision;
+        if (ignoreOffer) {
+            RTC_LOG(LS_INFO) << "Ingoring remote sdp";
+            return;
+        }
+
+        _isSettingRemoteAnswerPending = type == "answer";
+
         const auto weak = std::weak_ptr<InstanceV2ReferenceImplInternal>(shared_from_this());
         webrtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface> observer(new rtc::RefCountedObject<SetSessionDescriptionObserver>([threads = _threads, weak, type](webrtc::RTCError error) {
             threads->getMediaThread()->PostTask([weak, type]() {
@@ -1126,34 +1136,33 @@ public:
                     return;
                 }
 
+                strong->_isSettingRemoteAnswerPending = false;
+
+                strong->maybeCommitPendingIceCandidates();
+
                 if (type == "offer") {
-                    strong->_didBeginNegotiation = true;
                     strong->sendLocalDescription();
                 }
             });
         }));
         RTC_LOG(LS_INFO) << "Calling SetRemoteDescription";
         _peerConnection->SetRemoteDescription(std::move(remoteDescription), observer);
-
-        if (!_handshakeCompleted) {
-            _handshakeCompleted = true;
-
-            commitPendingIceCandidates();
-        }
     }
 
-    void commitPendingIceCandidates() {
+    void maybeCommitPendingIceCandidates() {
         if (_pendingIceCandidates.size() == 0) {
             return;
         }
 
-        for (const auto &candidate : _pendingIceCandidates) {
-            if (candidate) {
-                _peerConnection->AddIceCandidate(candidate.get());
+        if (_peerConnection->local_description() && _peerConnection->remote_description()) {
+            for (const auto &candidate : _pendingIceCandidates) {
+                if (candidate) {
+                    _peerConnection->AddIceCandidate(candidate.get());
+                }
             }
-        }
 
-        _pendingIceCandidates.clear();
+            _pendingIceCandidates.clear();
+        }
     }
 
     void onNetworkStateUpdated() {
@@ -1586,6 +1595,7 @@ private:
 
     bool _didBeginNegotiation = false;
     bool _isMakingOffer = false;
+    bool _isSettingRemoteAnswerPending = false;
     bool _isPerformingConfiguration = false;
 
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> _outgoingAudioTrack;
@@ -1597,7 +1607,6 @@ private:
 
     std::map<std::string, webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>> _incomingVideoTransceivers;
 
-    bool _handshakeCompleted = false;
     std::vector<std::unique_ptr<webrtc::IceCandidateInterface>> _pendingIceCandidates;
 
     std::unique_ptr<DataChannelObserverImpl> _dataChannelObserver;
