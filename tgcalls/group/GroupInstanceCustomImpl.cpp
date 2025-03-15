@@ -4130,7 +4130,13 @@ private:
         if (_createWrappedAudioDeviceModule) {
             auto result = _createWrappedAudioDeviceModule(&_webrtcEnvironment.task_queue_factory());
             if (result) {
-                return result;
+                if (audioDeviceDataObserverShared) {
+                    auto audioDeviceObserver = std::make_unique<AudioDeviceDataObserverImpl>(audioDeviceDataObserverShared);
+                    auto moduleWithObserver = webrtc::CreateAudioDeviceWithDataObserver(result, std::move(audioDeviceObserver));
+                    return rtc::make_ref_counted<DefaultWrappedAudioDeviceModule>(moduleWithObserver);
+                } else {
+                    return result;
+                }
             }
         }
         if (_createAudioDeviceModule) {
