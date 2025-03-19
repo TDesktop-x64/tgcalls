@@ -29,6 +29,7 @@ struct PlatformCaptureInfo {
 class WrappedAudioDeviceModule : public webrtc::AudioDeviceModule {
 public:
     virtual void Stop() = 0;
+    virtual void setIsActive(bool isActive) = 0;
 };
 
 class DefaultWrappedAudioDeviceModule : public WrappedAudioDeviceModule {
@@ -41,6 +42,9 @@ public:
     }
 
     virtual void Stop() override {
+    }
+    
+    virtual void setIsActive(bool isActive) override {
     }
 
     virtual int32_t ActiveAudioLayer(AudioLayer *audioLayer) const override {

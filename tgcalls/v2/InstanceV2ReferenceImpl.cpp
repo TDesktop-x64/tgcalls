@@ -8,7 +8,6 @@
 #include "v2/ContentNegotiation.h"
 
 #include "CodecSelectHelper.h"
-#include "platform/PlatformInterface.h"
 
 #include "api/audio_codecs/audio_decoder_factory_template.h"
 #include "api/audio_codecs/audio_encoder_factory_template.h"
@@ -404,8 +403,6 @@ public:
     }
 
     void start() {
-        PlatformInterface::SharedInstance()->configurePlatformAudio();
-
         const auto weak = std::weak_ptr<InstanceV2ReferenceImplInternal>(shared_from_this());
 
         PlatformInterface::SharedInstance()->configurePlatformAudio();
