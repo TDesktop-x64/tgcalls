@@ -134,7 +134,7 @@ public:
         std::function<void()> onRenegotiationNeeded;
         std::function<void(const webrtc::IceCandidateInterface *)> onIceCandidate;
         std::function<void(webrtc::PeerConnectionInterface::SignalingState state)> onSignalingChange;
-        std::function<void(webrtc::PeerConnectionInterface::PeerConnectionState state)> onConnectionChange;
+        std::function<void(webrtc::PeerConnectionInterface::IceConnectionState state)> onConnectionChange;
         std::function<void(webrtc::scoped_refptr<webrtc::DataChannelInterface>)> onDataChannel;
         std::function<void(webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>)> onTransceiverAdded;
         std::function<void(webrtc::scoped_refptr<webrtc::RtpReceiverInterface>)> onTransceiverRemoved;
@@ -181,15 +181,15 @@ public:
     }
 
     void OnIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState new_state) override {
+        if (_parameters.onConnectionChange) {
+            _parameters.onConnectionChange(new_state);
+        }
     }
 
     void OnStandardizedIceConnectionChange(webrtc::PeerConnectionInterface::IceConnectionState new_state) override {
     }
 
     void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState new_state) override {
-        if (_parameters.onConnectionChange) {
-            _parameters.onConnectionChange(new_state);
-        }
     }
 
     void OnIceGatheringChange(webrtc::PeerConnectionInterface::IceGatheringState new_state) override {
@@ -519,7 +519,7 @@ public:
                 }
             }*/
         };
-        delegateParameters.onConnectionChange = [weak](webrtc::PeerConnectionInterface::PeerConnectionState state) {
+        delegateParameters.onConnectionChange = [weak](webrtc::PeerConnectionInterface::IceConnectionState state) {
             const auto strong = weak.lock();
             if (!strong) {
                 return;
@@ -529,11 +529,15 @@ public:
             bool isFailed = false;
 
             switch (state) {
-                case webrtc::PeerConnectionInterface::PeerConnectionState::kConnected: {
+                case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected: {
                     isConnected = true;
                     break;
                 }
-                case webrtc::PeerConnectionInterface::PeerConnectionState::kFailed: {
+                case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted: {
+                    isConnected = true;
+                    break;
+                }
+                case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed: {
                     isFailed = true;
                     break;
                 }
@@ -638,6 +642,7 @@ public:
         } else {
             peerConnectionConfiguration.type = webrtc::PeerConnectionInterface::IceTransportsType::kRelay;
         }
+        peerConnectionConfiguration.tcp_candidate_policy = webrtc::PeerConnectionInterface::TcpCandidatePolicy::kTcpCandidatePolicyDisabled;
         peerConnectionConfiguration.enable_ice_renomination = true;
         peerConnectionConfiguration.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
         peerConnectionConfiguration.bundle_policy = webrtc::PeerConnectionInterface::kBundlePolicyMaxBundle;
