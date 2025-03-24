@@ -979,78 +979,6 @@ private:
     std::vector<int16_t> _samples;
 };
 
-class FrameDecryptorImpl : public webrtc::FrameDecryptorInterface {
-public:
-    FrameDecryptorImpl(EncryptionKey const &encryptionKey) {
-        _connection = std::make_unique<EncryptedConnection>(
-            EncryptedConnection::Type::Transport,
-            EncryptionKey(encryptionKey.value, false),
-            [](int, int) {
-            }
-        );
-    }
-    
-    virtual ~FrameDecryptorImpl() override {
-    }
-    
-public:
-    virtual Result Decrypt(
-        cricket::MediaType media_type,
-        const std::vector<uint32_t>& csrcs,
-        rtc::ArrayView<const uint8_t> additional_data,
-        rtc::ArrayView<const uint8_t> encrypted_frame,
-        rtc::ArrayView<uint8_t> frame
-    ) override {
-        if (media_type == cricket::MediaType::MEDIA_TYPE_VIDEO) {
-            if (encrypted_frame.size() < 4) {
-                return Result(Status::kFailedToDecrypt, 0);
-            }
-            uint32_t plaintextHeaderSize = 0;
-            memcpy(&plaintextHeaderSize, encrypted_frame.begin() + (encrypted_frame.size() - 4), 4);
-            
-            if (plaintextHeaderSize > encrypted_frame.size() - 4) {
-                return Result(Status::kFailedToDecrypt, 0);
-            }
-            
-            std::copy(encrypted_frame.begin(), encrypted_frame.begin() + plaintextHeaderSize, frame.begin());
-            
-            if (encrypted_frame.size() > 4 + plaintextHeaderSize) {
-                rtc::CopyOnWriteBuffer buffer(encrypted_frame.size() - 4 - plaintextHeaderSize);
-                std::copy(encrypted_frame.begin() + plaintextHeaderSize, encrypted_frame.begin() + plaintextHeaderSize + (encrypted_frame.size() - 4 - plaintextHeaderSize), buffer.MutableData());
-                auto result = _connection->decryptRawPacket(buffer);
-                if (result) {
-                    std::copy(result->data(), result->data() + result->size(), frame.begin() + plaintextHeaderSize);
-                    return Result(Status::kOk, plaintextHeaderSize + result->size());
-                } else {
-                    return Result(Status::kFailedToDecrypt, 0);
-                }
-            } else {
-                return Result(Status::kOk, plaintextHeaderSize);
-            }
-        } else {
-            rtc::CopyOnWriteBuffer buffer(encrypted_frame.size());
-            std::copy(encrypted_frame.begin(), encrypted_frame.end(), buffer.MutableData());
-            auto result = _connection->decryptRawPacket(buffer);
-            if (result) {
-                std::copy(result->data(), result->data() + result->size(), frame.begin());
-                return Result(Status::kOk, result->size());
-            } else {
-                return Result(Status::kFailedToDecrypt, 0);
-            }
-        }
-    }
-
-    virtual size_t GetMaxPlaintextByteSize(
-        cricket::MediaType media_type,
-        size_t encrypted_frame_size
-    ) override {
-        return encrypted_frame_size;
-    }
-    
-private:
-    std::unique_ptr<EncryptedConnection> _connection;
-};
-
 static constexpr uint8_t kTypeMask = 0x1F;
 static constexpr uint8_t kFuA = 28;
 static constexpr uint8_t kIdr = 5;
@@ -1157,103 +1085,11 @@ uint32_t calculateVideoFramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fr
     return (uint32_t)maxOffset;
 }
 
-class FrameEncryptorImpl : public webrtc::FrameEncryptorInterface {
-public:
-    FrameEncryptorImpl(EncryptionKey const &encryptionKey) {
-        _connection = std::make_unique<EncryptedConnection>(
-            EncryptedConnection::Type::Transport,
-            EncryptionKey(encryptionKey.value, true),
-            [](int, int) {
-            }
-        );
-    }
-    
-    virtual ~FrameEncryptorImpl() override {
-    }
-    
-    virtual int Encrypt(
-        cricket::MediaType media_type,
-        uint32_t ssrc,
-        rtc::ArrayView<const uint8_t> additional_data,
-        rtc::ArrayView<const uint8_t> frame,
-        rtc::ArrayView<uint8_t> encrypted_frame,
-        size_t *bytes_written
-    ) override {
-        if (media_type == cricket::MediaType::MEDIA_TYPE_VIDEO) {
-            uint32_t plaintextHeaderSize = calculateVideoFramePlaintextHeaderSize(frame);
-            if (plaintextHeaderSize > (uint32_t)frame.size()) {
-                plaintextHeaderSize = (uint32_t)frame.size();
-            }
-            
-            if (plaintextHeaderSize >= (uint32_t)frame.size()) {
-                rtc::CopyOnWriteBuffer buffer(frame.size() + 4);
-                std::copy(frame.begin(), frame.begin() + plaintextHeaderSize, buffer.MutableData());
-                memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
-                
-                std::copy(buffer.data(), buffer.data() + buffer.size(), encrypted_frame.begin());
-                if (bytes_written) {
-                    *bytes_written = buffer.size();
-                }
-                return 0;
-            } else {
-                rtc::CopyOnWriteBuffer encryptedBuffer(frame.size() - plaintextHeaderSize);
-                std::copy(frame.begin() + plaintextHeaderSize, frame.end(), encryptedBuffer.MutableData());
-                auto result = _connection->encryptRawPacket(encryptedBuffer);
-                if (result) {
-                    rtc::CopyOnWriteBuffer buffer(plaintextHeaderSize + result->size() + 4);
-                    
-                    std::copy(frame.begin(), frame.begin() + plaintextHeaderSize, buffer.MutableData());
-                    std::copy(result->data(), result->data() + result->size(), buffer.MutableData() + plaintextHeaderSize);
-                    memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
-                    std::copy(buffer.data(), buffer.data() + buffer.size(), encrypted_frame.begin());
-                    
-                    if (bytes_written) {
-                        *bytes_written = buffer.size();
-                    }
-                    return 0;
-                } else {
-                    return 1;
-                }
-            }
-        } else {
-            rtc::CopyOnWriteBuffer buffer(frame.size());
-            std::copy(frame.begin(), frame.end(), buffer.MutableData());
-            auto result = _connection->encryptRawPacket(buffer);
-            if (result) {
-                std::copy(result->data(), result->data() + result->size(), encrypted_frame.begin());
-                if (bytes_written) {
-                    *bytes_written = result->size();
-                }
-                return 0;
-            } else {
-                return 1;
-            }
-            
-            return 0;
-        }
-    }
-
-    virtual size_t GetMaxCiphertextByteSize(
-        cricket::MediaType media_type,
-        size_t frame_size
-    ) override {
-        return frame_size + 64;
-    }
-    
-private:
-    std::unique_ptr<EncryptedConnection> _connection;
-};
-
 class FrameTransformer : public webrtc::FrameTransformerInterface {
 public:
-    FrameTransformer(bool isEncryptor, EncryptionKey const &encryptionKey) :
-    _isEncryptor(isEncryptor) {
-        _connection = std::make_unique<EncryptedConnection>(
-            EncryptedConnection::Type::Transport,
-            EncryptionKey(encryptionKey.value, isEncryptor),
-            [](int, int) {
-            }
-        );
+    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> transform) :
+    _isEncryptor(isEncryptor),
+    _transform(transform) {
     }
     
     virtual void RegisterTransformedFrameCallback(rtc::scoped_refptr<webrtc::TransformedFrameCallback> callback) override {
@@ -1295,14 +1131,18 @@ public:
                         _sinkCallback->OnTransformedFrame(std::move(frame));
                     }
                 } else {
-                    rtc::CopyOnWriteBuffer encryptedBuffer(frame->GetData().size() - plaintextHeaderSize);
-                    std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().end(), encryptedBuffer.MutableData());
-                    auto result = _connection->encryptRawPacket(encryptedBuffer);
-                    if (result) {
-                        rtc::CopyOnWriteBuffer buffer(plaintextHeaderSize + result->size() + 4);
+                    std::vector<uint8_t> encryptedBuffer;
+                    encryptedBuffer.resize(frame->GetData().size() - plaintextHeaderSize);
+                    
+                    std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().end(), encryptedBuffer.begin());
+                    
+                    auto result = _transform(encryptedBuffer, _isEncryptor);
+                    
+                    if (!result.empty()) {
+                        rtc::CopyOnWriteBuffer buffer(plaintextHeaderSize + result.size() + 4);
                         
                         std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, buffer.MutableData());
-                        std::copy(result->data(), result->data() + result->size(), buffer.MutableData() + plaintextHeaderSize);
+                        std::copy(result.data(), result.data() + result.size(), buffer.MutableData() + plaintextHeaderSize);
                         memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
                         
                         frame->SetData(buffer);
@@ -1312,11 +1152,12 @@ public:
                     }
                 }
             } else {
-                rtc::CopyOnWriteBuffer buffer(frame->GetData().size());
-                std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.MutableData());
-                auto result = _connection->encryptRawPacket(buffer);
-                if (result) {
-                    frame->SetData(result.value());
+                std::vector<uint8_t> buffer;
+                buffer.resize(frame->GetData().size());
+                std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.begin());
+                auto result = _transform(buffer, _isEncryptor);
+                if (!result.empty()) {
+                    frame->SetData(result);
                     if (_sinkCallback) {
                         _sinkCallback->OnTransformedFrame(std::move(frame));
                     }
@@ -1335,15 +1176,17 @@ public:
                 }
                 
                 if (frame->GetData().size() > 4 + plaintextHeaderSize) {
-                    rtc::CopyOnWriteBuffer buffer(frame->GetData().size() - 4 - plaintextHeaderSize);
-                    std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().begin() + plaintextHeaderSize + (frame->GetData().size() - 4 - plaintextHeaderSize), buffer.MutableData());
-                    auto result = _connection->decryptRawPacket(buffer);
-                    if (result) {
-                        rtc::CopyOnWriteBuffer decryptedFrame(plaintextHeaderSize + result->size());
+                    std::vector<uint8_t> buffer;
+                    buffer.resize(frame->GetData().size() - 4 - plaintextHeaderSize);
+                    
+                    std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().begin() + plaintextHeaderSize + (frame->GetData().size() - 4 - plaintextHeaderSize), buffer.begin());
+                    auto result = _transform(buffer, _isEncryptor);
+                    if (!result.empty()) {
+                        rtc::CopyOnWriteBuffer decryptedFrame(plaintextHeaderSize + result.size());
                         
                         std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, decryptedFrame.MutableData());
                         
-                        std::copy(result->data(), result->data() + result->size(), decryptedFrame.MutableData() + plaintextHeaderSize);
+                        std::copy(result.data(), result.data() + result.size(), decryptedFrame.MutableData() + plaintextHeaderSize);
                         frame->SetData(decryptedFrame);
                         if (_sinkCallback) {
                             _sinkCallback->OnTransformedFrame(std::move(frame));
@@ -1360,11 +1203,12 @@ public:
                     }
                 }
             } else {
-                rtc::CopyOnWriteBuffer buffer(frame->GetData().size());
-                std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.MutableData());
-                auto result = _connection->decryptRawPacket(buffer);
-                if (result) {
-                    frame->SetData(result.value());
+                std::vector<uint8_t> buffer;
+                buffer.resize(frame->GetData().size());
+                std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.begin());
+                auto result = _transform(buffer, _isEncryptor);
+                if (!result.empty()) {
+                    frame->SetData(result);
                     if (_sinkCallback) {
                         _sinkCallback->OnTransformedFrame(std::move(frame));
                     }
@@ -1375,8 +1219,8 @@ public:
     
 private:
     bool _isEncryptor;
+    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> _transform;
     webrtc::Mutex _mutex;
-    std::unique_ptr<EncryptedConnection> _connection;
     rtc::scoped_refptr<webrtc::TransformedFrameCallback> _sinkCallback;
 };
 
@@ -1392,14 +1236,14 @@ public:
         std::function<void(AudioSinkImpl::Update)> &&onAudioLevelUpdated,
         std::function<void(uint32_t, const AudioFrame &)> onAudioFrame,
         std::shared_ptr<Threads> threads,
-        std::optional<EncryptionKey> const &encryptionKey) :
+        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt) :
     _threads(threads),
     _ssrc(ssrc),
     _channelManager(channelManager),
     _call(call) {
         _creationTimestamp = rtc::TimeMillis();
 
-        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, encryptionKey]() mutable {
+        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, e2eEncryptDecrypt]() mutable {
             cricket::AudioOptions audioOptions;
             audioOptions.audio_jitter_buffer_fast_accelerate = true;
             audioOptions.audio_jitter_buffer_min_delay_ms = 50;
@@ -1455,8 +1299,8 @@ public:
             outgoingAudioDescription.reset();
             incomingAudioDescription.reset();
             
-            if (encryptionKey) {
-                _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, encryptionKey.value()));
+            if (e2eEncryptDecrypt) {
+                _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt));
             }
 
             if (_ssrc.actualSsrc != 1) {
@@ -1523,7 +1367,7 @@ public:
         VideoChannelDescription::Quality maxQuality,
         GroupParticipantVideoInformation const &description,
         std::shared_ptr<Threads> threads,
-        std::optional<EncryptionKey> const &encryptionKey) :
+        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt) :
     _threads(threads),
     _endpointId(description.endpointId),
     _channelManager(channelManager),
@@ -1532,7 +1376,7 @@ public:
     _requestedMaxQuality(maxQuality) {
         _videoSink.reset(new VideoSinkImpl(_endpointId));
 
-        _threads->getWorkerThread()->BlockingCall([this, rtpTransport, &availableVideoFormats, &description, randomIdGenerator, encryptionKey]() mutable {
+        _threads->getWorkerThread()->BlockingCall([this, rtpTransport, &availableVideoFormats, &description, randomIdGenerator, e2eEncryptDecrypt]() mutable {
             uint32_t mid = randomIdGenerator->GenerateId();
             std::string streamId = std::string("video") + uint32ToString(mid);
 
@@ -1613,8 +1457,8 @@ public:
             _videoChannel->SetPayloadTypeDemuxingEnabled(false);
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
             
-            if (encryptionKey) {
-                _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, encryptionKey.value()));
+            if (e2eEncryptDecrypt) {
+                _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt));
             }
         });
 
@@ -1954,7 +1798,7 @@ public:
     _minOutgoingVideoBitrateKbit(descriptor.minOutgoingVideoBitrateKbit),
     _videoContentType(descriptor.videoContentType),
     _videoCodecPreferences(std::move(descriptor.videoCodecPreferences)),
-    _encryptionKey(descriptor.encryptionKey),
+    _e2eEncryptDecrypt(descriptor.e2eEncryptDecrypt),
     _eventLog(std::make_unique<webrtc::RtcEventLogNull>()),
     _webrtcEnvironment(webrtc::EnvironmentFactory().Create()),
     _netEqFactory(createNetEqFactory()),
@@ -2366,9 +2210,9 @@ public:
             _outgoingVideoChannel->SetLocalContent(outgoingVideoDescription.get(), webrtc::SdpType::kOffer, errorDesc);
             _outgoingVideoChannel->SetPayloadTypeDemuxingEnabled(false);
             
-            if (_encryptionKey) {
+            if (_e2eEncryptDecrypt) {
                 for (auto ssrc : simulcastGroupSsrcs) {
-                    _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _encryptionKey.value()));
+                    _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt));
                 }
             }
         });
@@ -2564,8 +2408,8 @@ public:
             _outgoingAudioChannel->SetRemoteContent(incomingAudioDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _outgoingAudioChannel->SetPayloadTypeDemuxingEnabled(false);
             
-            if (_encryptionKey) {
-                _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _encryptionKey.value()));
+            if (_e2eEncryptDecrypt) {
+                _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt));
             }
         });
 
@@ -3701,7 +3545,7 @@ public:
             VideoChannelDescription::Quality::Thumbnail,
             videoInformation,
             _threads,
-            _encryptionKey
+            _e2eEncryptDecrypt
         ));
 
         ChannelSsrcInfo mapping;
@@ -3865,7 +3709,7 @@ public:
             std::move(onAudioSinkUpdate),
             _onAudioFrame,
             _threads,
-            _encryptionKey
+            _e2eEncryptDecrypt
         ));
 
         auto volume = _volumeBySsrc.find(ssrc.actualSsrc);
@@ -3936,7 +3780,7 @@ public:
             maxQuality,
             videoInformation,
             _threads,
-            _encryptionKey
+            _e2eEncryptDecrypt
         ));
 
         const auto pendingSinks = _pendingVideoSinks.find(VideoChannelId(videoInformation.endpointId));
@@ -4181,7 +4025,7 @@ private:
     int _minOutgoingVideoBitrateKbit{100};
     VideoContentType _videoContentType{VideoContentType::None};
     std::vector<VideoCodecName> _videoCodecPreferences;
-    std::optional<EncryptionKey> _encryptionKey;
+    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> _e2eEncryptDecrypt;
 
     int _nextMediaChannelDescriptionsRequestId = 0;
     std::map<int, RequestedMediaChannelDescriptions> _requestedMediaChannelDescriptions;
