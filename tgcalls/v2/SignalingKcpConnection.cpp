@@ -26,6 +26,9 @@ static inline void itimeofday(long *sec, long *usec) {
     time =  ((uint64_t)file_time.dwLowDateTime )      ;
     time += ((uint64_t)file_time.dwHighDateTime) << 32;
 
+    // Windows FILETIME epoch (1601-01-01) to Unix epoch (1970-01-01) in 100-nanosecond intervals
+    constexpr auto EPOCH = 11644473600000000ULL;
+
     if (sec) *sec  = (long) ((time - EPOCH) / 10000000L);
     if (usec) *usec = (long) (system_time.wMilliseconds * 1000);
 #else
@@ -56,13 +59,13 @@ _threads(threads),
 _emitData(emitData),
 _onIncomingData(onIncomingData) {
     _receiveBuffer.resize(512 * 1024);
-    
+
     _kcp = ikcp_create(0, this);
     _kcp->output = &SignalingKcpConnection::udpOutput;
-    
+
     ikcp_wndsize(_kcp, 128, 128);
     ikcp_nodelay(_kcp, 0, 10, 0, 0);
-    
+
     //_onIncomingData
 }
 
@@ -75,7 +78,7 @@ int SignalingKcpConnection::udpOutput(const char *buf, int len, ikcpcb *kcp, voi
 }
 
 SignalingKcpConnection::~SignalingKcpConnection() {
-    
+
 }
 
 void SignalingKcpConnection::start() {
@@ -89,16 +92,16 @@ void SignalingKcpConnection::scheduleInternalUpdate(int timeoutMs) {
         if (!strong) {
             return;
         }
-        
+
         strong->performInternalUpdate();
-        
+
         strong->scheduleInternalUpdate(10);
     }, webrtc::TimeDelta::Millis(timeoutMs));
 }
 
 void SignalingKcpConnection::performInternalUpdate() {
     ikcp_update(_kcp, iclock());
-    
+
     while (true) {
         int result = ikcp_recv(_kcp, (char *)_receiveBuffer.data(), (int)_receiveBuffer.size());
         if (result >= 0) {
