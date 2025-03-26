@@ -395,10 +395,11 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
     disableAudioInput:(bool)disableAudioInput
     preferX264:(bool)preferX264
     logPath:(NSString * _Nonnull)logPath
-statsLogPath:(NSString * _Nonnull)statsLogPath
-audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
-encryptionKey:(NSData * _Nullable)encryptionKey
-isConference:(bool)isConference;
+    statsLogPath:(NSString * _Nonnull)statsLogPath
+    audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
+    encryptionKey:(NSData * _Nullable)encryptionKey
+    isConference:(bool)isConference
+    isActiveByDefault:(bool)isActiveByDefault;
 
 - (void)stop:(void (^ _Nullable)())completion;
 

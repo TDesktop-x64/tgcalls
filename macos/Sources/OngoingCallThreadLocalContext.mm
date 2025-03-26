@@ -1407,7 +1407,8 @@ private:
 statsLogPath:(NSString * _Nonnull)statsLogPath
 audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
 encryptionKey:(NSData * _Nullable)encryptionKey
-isConference:(bool)isConference {
+isConference:(bool)isConference
+isActiveByDefault:(bool)isActiveByDefault {
     self = [super init];
     if (self != nil) {
         _queue = queue;
@@ -1482,6 +1483,7 @@ isConference:(bool)isConference {
             
             mappedEncryptionKey = tgcalls::EncryptionKey(encryptionKeyValue, true);
         }
+        
 
         __weak GroupCallThreadLocalContext *weakSelf = self;
         _instance.reset(new tgcalls::GroupInstanceCustomImpl((tgcalls::GroupInstanceDescriptor){
@@ -1700,7 +1702,7 @@ isConference:(bool)isConference {
 //                    }
 //                }];
 //            },
-            .encryptionKey = mappedEncryptionKey,
+//            .e2eEncryptDecrypt = mappedEncryptionKey,
             .isConference = isConference
         }));
     }
