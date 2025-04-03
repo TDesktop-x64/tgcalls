@@ -121,6 +121,7 @@ struct MediaChannelDescription {
 
     Type type = Type::Audio;
     uint32_t audioSsrc = 0;
+    int64_t userId = 0;
     std::string videoInformation;
 };
 
@@ -136,6 +137,7 @@ struct VideoChannelDescription {
         Full
     };
     uint32_t audioSsrc = 0;
+    int64_t userId = 0;
     std::string endpointId;
     std::vector<MediaSsrcGroup> ssrcGroups;
     Quality minQuality = Quality::Thumbnail;
@@ -181,7 +183,7 @@ struct GroupInstanceDescriptor {
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> requestMediaChannelDescriptions;
     int minOutgoingVideoBitrateKbit{100};
     std::function<void(bool)> onMutedSpeechActivityDetected;
-    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt;
+    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> e2eEncryptDecrypt;
     bool isConference{false};
 };
 
