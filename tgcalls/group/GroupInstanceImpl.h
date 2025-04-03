@@ -13,8 +13,6 @@
 #include "../StaticThreads.h"
 #include "GroupJoinPayload.h"
 
-#include "platform/PlatformInterface.h"
-
 namespace webrtc {
 class AudioDeviceModule;
 class TaskQueueFactory;
@@ -30,6 +28,7 @@ namespace tgcalls {
 
 class LogSinkImpl;
 class GroupInstanceManager;
+class WrappedAudioDeviceModule;
 struct AudioFrame;
 
 struct GroupConfig {

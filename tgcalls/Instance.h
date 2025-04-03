@@ -10,8 +10,6 @@
 #include "Stats.h"
 #include "DirectConnectionChannel.h"
 
-#include "platform/PlatformInterface.h"
-
 namespace rtc {
 template <typename VideoFrameT>
 class VideoSinkInterface;
@@ -27,6 +25,7 @@ class scoped_refptr;
 
 namespace tgcalls {
 
+class WrappedAudioDeviceModule;
 class VideoCaptureInterface;
 
 struct FilePath {

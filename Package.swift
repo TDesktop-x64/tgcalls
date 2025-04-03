@@ -27,8 +27,6 @@ let package = Package(
                       "tgcalls/platform/darwin/iOS",
                       "tgcalls/platform/darwin/VideoCaptureView.mm",
                       "tgcalls/platform/darwin/VideoCaptureView.h",
-                      "tgcalls/platform/darwin/GLVideoView.mm",
-                      "tgcalls/platform/darwin/GLVideoView.h",
                       "tgcalls/platform/darwin/VideoMetalView.mm",
                       "tgcalls/platform/darwin/VideoMetalView.h",
                       "tgcalls/platform/darwin/VideoSampleBufferView.mm",

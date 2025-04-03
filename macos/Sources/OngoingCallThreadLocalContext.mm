@@ -1377,15 +1377,20 @@ private:
 
     int _nextSinkId;
     NSMutableDictionary<NSNumber *, GroupCallVideoSink *> *_sinks;
+    
+    int32_t _signalBars;
+
 }
 
 @end
+
 
 @implementation GroupCallThreadLocalContext
 
 - (instancetype _Nonnull)initWithQueue:(id<OngoingCallThreadLocalContextQueueWebrtc> _Nonnull)queue
     networkStateUpdated:(void (^ _Nonnull)(GroupCallNetworkState))networkStateUpdated
     audioLevelsUpdated:(void (^ _Nonnull)(NSArray<NSNumber *> * _Nonnull))audioLevelsUpdated
+    activityUpdated:(void (^ _Nonnull)(NSArray<NSNumber *> * _Nonnull))activityUpdated
     inputDeviceId:(NSString * _Nonnull)inputDeviceId
     outputDeviceId:(NSString * _Nonnull)outputDeviceId
     videoCapturer:(OngoingCallThreadLocalContextVideoCapturer * _Nullable)videoCapturer
@@ -1398,7 +1403,12 @@ private:
     enableNoiseSuppression:(bool)enableNoiseSuppression
     disableAudioInput:(bool)disableAudioInput
     preferX264:(bool)preferX264
-    logPath:(NSString * _Nonnull)logPath {
+    logPath:(NSString * _Nonnull)logPath
+statsLogPath:(NSString * _Nonnull)statsLogPath
+audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
+encryptionKey:(NSData * _Nullable)encryptionKey
+isConference:(bool)isConference
+isActiveByDefault:(bool)isActiveByDefault {
     self = [super init];
     if (self != nil) {
         _queue = queue;
@@ -1410,6 +1420,14 @@ private:
         _networkStateUpdated = [networkStateUpdated copy];
         _videoCapturer = videoCapturer;
         
+//        _onMutedSpeechActivityDetected = [onMutedSpeechActivityDetected copy];
+//        
+//        _audioDevice = audioDevice;
+//        std::shared_ptr<tgcalls::ThreadLocalObject<tgcalls::SharedAudioDeviceModule>> audioDeviceModule;
+//        if (_audioDevice) {
+//            audioDeviceModule = [_audioDevice getAudioDeviceModule];
+//        }
+//        
         tgcalls::VideoContentType _videoContentType;
         switch (videoContentType) {
             case OngoingGroupCallVideoContentTypeGeneric: {
@@ -1430,6 +1448,23 @@ private:
             }
         }
         
+#ifdef WEBRTC_IOS
+        RTCAudioSessionConfiguration *sharedConfiguration = [RTCAudioSessionConfiguration webRTCConfiguration];
+        sharedConfiguration.mode = AVAudioSessionModeVoiceChat;
+        sharedConfiguration.categoryOptions |= AVAudioSessionCategoryOptionMixWithOthers;
+        sharedConfiguration.categoryOptions |= AVAudioSessionCategoryOptionAllowBluetoothA2DP;
+        if (disableAudioInput) {
+            sharedConfiguration.outputNumberOfChannels = 2;
+        } else {
+            sharedConfiguration.outputNumberOfChannels = 1;
+        }
+        [RTCAudioSessionConfiguration setWebRTCConfiguration:sharedConfiguration];
+        
+        /*[RTCAudioSession sharedInstance].useManualAudio = true;
+         [[RTCAudioSession sharedInstance] audioSessionDidActivate:[AVAudioSession sharedInstance]];
+         [RTCAudioSession sharedInstance].isAudioEnabled = true;*/
+#endif
+        
         std::vector<tgcalls::VideoCodecName> videoCodecPreferences;
 
         int minOutgoingVideoBitrateKbit = 500;
@@ -1438,11 +1473,23 @@ private:
         tgcalls::GroupConfig config;
         config.need_log = true;
         config.logPath.data = std::string(logPath.length == 0 ? "" : logPath.UTF8String);
+        
+        std::string statsLogPathValue(statsLogPath.length == 0 ? "" : statsLogPath.UTF8String);
+        
+        std::optional<tgcalls::EncryptionKey> mappedEncryptionKey;
+        if (encryptionKey) {
+            auto encryptionKeyValue = std::make_shared<std::array<uint8_t, 256>>();
+            memcpy(encryptionKeyValue->data(), encryptionKey.bytes, encryptionKey.length);
+            
+            mappedEncryptionKey = tgcalls::EncryptionKey(encryptionKeyValue, true);
+        }
+        
 
         __weak GroupCallThreadLocalContext *weakSelf = self;
         _instance.reset(new tgcalls::GroupInstanceCustomImpl((tgcalls::GroupInstanceDescriptor){
             .threads = tgcalls::StaticThreads::getThreads(),
             .config = config,
+            .statsLogPath = statsLogPathValue,
             .networkStateUpdated = [weakSelf, queue, networkStateUpdated](tgcalls::GroupNetworkState networkState) {
                 [queue dispatch:^{
                     __strong GroupCallThreadLocalContext *strongSelf = weakSelf;
@@ -1455,14 +1502,36 @@ private:
                     networkStateUpdated(mappedState);
                 }];
             },
+            .signalBarsUpdated = [weakSelf, queue](int value) {
+                [queue dispatch:^{
+                    __strong GroupCallThreadLocalContext *strongSelf = weakSelf;
+                    if (strongSelf) {
+                        strongSelf->_signalBars = value;
+                        if (strongSelf->_signalBarsChanged) {
+                            strongSelf->_signalBarsChanged(value);
+                        }
+                    }
+                }];
+            },
             .audioLevelsUpdated = [audioLevelsUpdated](tgcalls::GroupLevelsUpdate const &levels) {
                 NSMutableArray *result = [[NSMutableArray alloc] init];
                 for (auto &it : levels.updates) {
                     [result addObject:@(it.ssrc)];
-                    [result addObject:@(it.value.level)];
+                    auto level = it.value.level;
+                    if (it.value.isMuted) {
+                        level = 0.0;
+                    }
+                    [result addObject:@(level)];
                     [result addObject:@(it.value.voice)];
                 }
                 audioLevelsUpdated(result);
+            },
+            .ssrcActivityUpdated = [activityUpdated](tgcalls::GroupActivitiesUpdate const &update) {
+                NSMutableArray *result = [[NSMutableArray alloc] init];
+                for (auto &it : update.updates) {
+                    [result addObject:@(it.ssrc)];
+                }
+                activityUpdated(result);
             },
             .initialInputDeviceId = inputDeviceId.UTF8String,
             .initialOutputDeviceId = outputDeviceId.UTF8String,
@@ -1565,6 +1634,7 @@ private:
             .outgoingAudioBitrateKbit = outgoingAudioBitrateKbit,
             .disableOutgoingAudioProcessing = disableOutgoingAudioProcessing,
             .disableAudioInput = disableAudioInput,
+            .ios_enableSystemMute = false,
             .videoContentType = _videoContentType,
             .videoCodecPreferences = videoCodecPreferences,
             .initialEnableNoiseSuppression = enableNoiseSuppression,
@@ -1600,15 +1670,49 @@ private:
 
                 return std::make_shared<RequestMediaChannelDescriptionTaskImpl>(task);
             },
-            .minOutgoingVideoBitrateKbit = minOutgoingVideoBitrateKbit
+            .minOutgoingVideoBitrateKbit = minOutgoingVideoBitrateKbit,
+//            .createAudioDeviceModule = [weakSelf, queue, disableAudioInput, enableSystemMute, audioDeviceModule, onMutedSpeechActivityDetected = _onMutedSpeechActivityDetected](webrtc::TaskQueueFactory *taskQueueFactory) -> rtc::scoped_refptr<webrtc::AudioDeviceModule> {
+//                if (audioDeviceModule) {
+//                    return audioDeviceModule->getSyncAssumingSameThread()->audioDeviceModule();
+//                } else {
+//                    rtc::Thread *audioDeviceModuleThread = rtc::Thread::Current();
+//                    auto resultModule = rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, disableAudioInput, enableSystemMute, disableAudioInput ? 2 : 1);
+//                    if (resultModule) {
+//                        resultModule->mutedSpeechDetectionChanged = ^(bool value) {
+//                            if (onMutedSpeechActivityDetected) {
+//                                onMutedSpeechActivityDetected(value);
+//                            }
+//                        };
+//                    }
+//                    [queue dispatch:^{
+//                        __strong GroupCallThreadLocalContext *strongSelf = weakSelf;
+//                        if (strongSelf) {
+//                            strongSelf->_currentAudioDeviceModuleThread = audioDeviceModuleThread;
+//                            strongSelf->_currentAudioDeviceModule = resultModule;
+//                        }
+//                    }];
+//                    return resultModule;
+//                }
+//            },
+//            .onMutedSpeechActivityDetected = [weakSelf, queue](bool value) {
+//                [queue dispatch:^{
+//                    __strong GroupCallThreadLocalContext *strongSelf = weakSelf;
+//                    if (strongSelf && strongSelf->_onMutedSpeechActivityDetected) {
+//                        strongSelf->_onMutedSpeechActivityDetected(value);
+//                    }
+//                }];
+//            },
+//            .e2eEncryptDecrypt = mappedEncryptionKey,
+            .isConference = isConference
         }));
     }
     return self;
 }
-
 - (void)stop {
     if (_instance) {
-        _instance->stop();
+        _instance->stop({
+            
+        });
         _instance.reset();
     }
 }
@@ -1880,6 +1984,15 @@ private:
             completion([[OngoingGroupCallStats alloc] initWithIncomingVideoStats:incomingVideoStats]);
         });
     }
+}
+
+- (void)setTone:(CallAudioTone * _Nullable)tone {
+}
+
+- (void)stop:(void (^ _Nullable __strong)())completion {
+}
+
+- (void)setManualAudioSessionIsActive:(bool)isAudioSessionActive {
 }
 
 @end

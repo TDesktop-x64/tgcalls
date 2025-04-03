@@ -145,7 +145,7 @@ static VideoCaptureInterfaceObject *GetVideoCaptureAssumingSameThread(VideoCaptu
 struct OutgoingVideoFormat {
     cricket::VideoCodec videoCodec;
     absl::optional<cricket::VideoCodec> rtxCodec;
-    
+
     OutgoingVideoFormat(cricket::VideoCodec const &videoCodec_, absl::optional<cricket::VideoCodec> rtxCodec_) :
     videoCodec(videoCodec_),
     rtxCodec(rtxCodec_) {
@@ -344,7 +344,7 @@ static std::vector<OutgoingVideoFormat> assignPayloadTypes(std::vector<webrtc::S
                     break;
                 }
             }
-            
+
             OutgoingVideoFormat resultFormat(codec, rtxCodec);
 
             result.push_back(std::move(resultFormat));
@@ -1076,12 +1076,12 @@ bool isKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
 
 uint32_t calculateVideoFramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
     size_t maxOffset = 0;
-    
+
     std::vector<webrtc::H264::NaluIndex> naluIndices = webrtc::H264::FindNaluIndices(frame.data(), frame.size());
     for (const webrtc::H264::NaluIndex &index : naluIndices) {
         isKeyFrame(frame.begin(), index.payload_start_offset, index.payload_size, maxOffset);
     }
-    
+
     return (uint32_t)maxOffset;
 }
 
@@ -1169,26 +1169,32 @@ public:
     _transform(transform),
     _payloadTypeMapping(payloadTypeMapping) {
     }
-    
+
     virtual void RegisterTransformedFrameCallback(rtc::scoped_refptr<webrtc::TransformedFrameCallback> callback) override {
         webrtc::MutexLock lock(&_mutex);
         assert(_sinkCallback == nullptr);
         _sinkCallback = callback;
     }
-    
+
     virtual void RegisterTransformedFrameSinkCallback(rtc::scoped_refptr<webrtc::TransformedFrameCallback> callback, uint32_t ssrc) override {
         webrtc::MutexLock lock(&_mutex);
-        _sinkCallback = callback;
+        _sinkCallbackBySsrc[ssrc] = callback;
     }
-    
+
     virtual void UnregisterTransformedFrameSinkCallback(uint32_t ssrc) override {
         webrtc::MutexLock lock(&_mutex);
-        _sinkCallback = nullptr;
+        _sinkCallbackBySsrc.erase(ssrc);
     }
-    
+
     virtual void Transform(std::unique_ptr<webrtc::TransformableFrameInterface> frame) override {
         webrtc::MutexLock lock(&_mutex);
-        if (!_sinkCallback) {
+
+        const auto ssrc = frame->GetSsrc();
+        const auto i = _sinkCallbackBySsrc.find(ssrc);
+        const auto sink = (i != _sinkCallbackBySsrc.end() && i->second)
+            ? i->second.get()
+            : _sinkCallback.get();
+        if (!sink) {
             return;
         }
         
@@ -1210,35 +1216,31 @@ public:
                 if (plaintextHeaderSize > (uint32_t)frame->GetData().size()) {
                     plaintextHeaderSize = (uint32_t)frame->GetData().size();
                 }
-                
+
                 if (plaintextHeaderSize >= (uint32_t)frame->GetData().size()) {
                     rtc::CopyOnWriteBuffer buffer(frame->GetData().size() + 4);
                     std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, buffer.MutableData());
                     memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
-                    
+
                     frame->SetData(buffer);
-                    if (_sinkCallback) {
-                        _sinkCallback->OnTransformedFrame(std::move(frame));
-                    }
+                    sink->OnTransformedFrame(std::move(frame));
                 } else {
                     std::vector<uint8_t> encryptedBuffer;
                     encryptedBuffer.resize(frame->GetData().size() - plaintextHeaderSize);
-                    
+
                     std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().end(), encryptedBuffer.begin());
-                    
+
                     auto result = _transform(encryptedBuffer, _isEncryptor);
-                    
+
                     if (!result.empty()) {
                         rtc::CopyOnWriteBuffer buffer(plaintextHeaderSize + result.size() + 4);
-                        
+
                         std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, buffer.MutableData());
                         std::copy(result.data(), result.data() + result.size(), buffer.MutableData() + plaintextHeaderSize);
                         memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
-                        
+
                         frame->SetData(buffer);
-                        if (_sinkCallback) {
-                            _sinkCallback->OnTransformedFrame(std::move(frame));
-                        }
+                        sink->OnTransformedFrame(std::move(frame));
                     }
                 }
             } else {
@@ -1248,9 +1250,7 @@ public:
                 auto result = _transform(buffer, _isEncryptor);
                 if (!result.empty()) {
                     frame->SetData(result);
-                    if (_sinkCallback) {
-                        _sinkCallback->OnTransformedFrame(std::move(frame));
-                    }
+                    sink->OnTransformedFrame(std::move(frame));
                 }
             }
         } else {
@@ -1260,37 +1260,33 @@ public:
                 }
                 uint32_t plaintextHeaderSize = 0;
                 memcpy(&plaintextHeaderSize, frame->GetData().begin() + (frame->GetData().size() - 4), 4);
-                
+
                 if (plaintextHeaderSize > frame->GetData().size() - 4) {
                     return;
                 }
-                
+
                 if (frame->GetData().size() > 4 + plaintextHeaderSize) {
                     std::vector<uint8_t> buffer;
                     buffer.resize(frame->GetData().size() - 4 - plaintextHeaderSize);
-                    
+
                     std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().begin() + plaintextHeaderSize + (frame->GetData().size() - 4 - plaintextHeaderSize), buffer.begin());
                     auto result = _transform(buffer, _isEncryptor);
                     if (!result.empty()) {
                         rtc::CopyOnWriteBuffer decryptedFrame(plaintextHeaderSize + result.size());
-                        
+
                         std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, decryptedFrame.MutableData());
-                        
+
                         std::copy(result.data(), result.data() + result.size(), decryptedFrame.MutableData() + plaintextHeaderSize);
                         frame->SetData(decryptedFrame);
-                        if (_sinkCallback) {
-                            _sinkCallback->OnTransformedFrame(std::move(frame));
-                        }
+                        sink->OnTransformedFrame(std::move(frame));
                     }
                 } else {
                     rtc::CopyOnWriteBuffer decryptedFrame(plaintextHeaderSize);
-                    
+
                     std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, decryptedFrame.MutableData());
-                    
+
                     frame->SetData(decryptedFrame);
-                    if (_sinkCallback) {
-                        _sinkCallback->OnTransformedFrame(std::move(frame));
-                    }
+                    sink->OnTransformedFrame(std::move(frame));
                 }
             } else {
                 std::vector<uint8_t> buffer;
@@ -1299,20 +1295,19 @@ public:
                 auto result = _transform(buffer, _isEncryptor);
                 if (!result.empty()) {
                     frame->SetData(result);
-                    if (_sinkCallback) {
-                        _sinkCallback->OnTransformedFrame(std::move(frame));
-                    }
+                    sink->OnTransformedFrame(std::move(frame));
                 }
             }
         }
     }
-    
+
 private:
     bool _isEncryptor;
     std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> _transform;
     std::map<int32_t, FrameTransformerPayloadType> _payloadTypeMapping;
     webrtc::Mutex _mutex;
     rtc::scoped_refptr<webrtc::TransformedFrameCallback> _sinkCallback;
+    std::map<uint32_t, rtc::scoped_refptr<webrtc::TransformedFrameCallback>> _sinkCallbackBySsrc;
 };
 
 class IncomingAudioChannel : public sigslot::has_slots<> {
@@ -1390,7 +1385,7 @@ public:
 
             outgoingAudioDescription.reset();
             incomingAudioDescription.reset();
-            
+
             if (e2eEncryptDecrypt) {
                 _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, payloadTypeMapping));
             }
@@ -1549,7 +1544,7 @@ public:
             _videoChannel->SetRemoteContent(incomingVideoDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _videoChannel->SetPayloadTypeDemuxingEnabled(false);
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
-            
+
             if (e2eEncryptDecrypt) {
                 _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, payloadTypeMapping));
             }
@@ -1946,7 +1941,7 @@ public:
 
     void start() {
         _startTimestamp = rtc::TimeMillis();
-        
+
         const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
 
         webrtc::field_trial::InitFieldTrialsFromString(
@@ -2044,7 +2039,7 @@ public:
             if (!_audioDeviceModule) {
                 return;
             }
-            
+
             bool isDeviceMuteAvailable = false;
             if (_audioDeviceModule->MicrophoneMuteIsAvailable(&isDeviceMuteAvailable) == 0) {
                 if (isDeviceMuteAvailable) {
@@ -2052,7 +2047,7 @@ public:
                 }
             }
         });
-        
+
         webrtc::PeerConnectionFactoryDependencies peerConnectionFactoryDeps;
         peerConnectionFactoryDeps.signaling_thread = _threads->getMediaThread();
         peerConnectionFactoryDeps.worker_thread = _threads->getWorkerThread();
@@ -2153,7 +2148,7 @@ public:
 
         beginRemoteConstraintsUpdateTimer(5000);
     }
-    
+
     void beginLogTimer(int delayMs) {
         const auto weak = std::weak_ptr<GroupInstanceCustomInternal>(shared_from_this());
         _threads->getMediaThread()->PostDelayedTask([weak]() {
@@ -2312,7 +2307,7 @@ public:
             _outgoingVideoChannel->SetRemoteContent(incomingVideoDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _outgoingVideoChannel->SetLocalContent(outgoingVideoDescription.get(), webrtc::SdpType::kOffer, errorDesc);
             _outgoingVideoChannel->SetPayloadTypeDemuxingEnabled(false);
-            
+
             if (_e2eEncryptDecrypt) {
                 for (auto ssrc : simulcastGroupSsrcs) {
                     _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, _payloadTypeMapping));
@@ -2510,7 +2505,7 @@ public:
             _outgoingAudioChannel->SetLocalContent(outgoingAudioDescription.get(), webrtc::SdpType::kOffer, errorDesc);
             _outgoingAudioChannel->SetRemoteContent(incomingAudioDescription.get(), webrtc::SdpType::kAnswer, errorDesc);
             _outgoingAudioChannel->SetPayloadTypeDemuxingEnabled(false);
-            
+
             if (_e2eEncryptDecrypt) {
                 _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, _payloadTypeMapping));
             }
@@ -2527,7 +2522,7 @@ public:
         _networkManager->perform([](GroupNetworkManager *networkManager) {
             networkManager->stop();
         });
-        
+
         json11::Json::object statsLog;
 
         for (int i = (int)_networkStateLogRecords.size() - 1; i >= 1; i--) {
@@ -2536,7 +2531,7 @@ public:
                 _networkStateLogRecords.erase(_networkStateLogRecords.begin() + i - 1);
             }
         }
-        
+
         for (int i = (int)_remoteNetworkStateLogRecords.size() - 1; i >= 1; i--) {
             // coalesce events within 5ms
             if (_remoteNetworkStateLogRecords[i].timestamp - _remoteNetworkStateLogRecords[i - 1].timestamp < 5) {
@@ -2561,7 +2556,7 @@ public:
             jsonNetworkStateLogRecords.push_back(std::move(jsonRecord));
         }
         statsLog.insert(std::make_pair("network", std::move(jsonNetworkStateLogRecords)));
-        
+
         json11::Json::array jsonRemoteNetworkStateLogRecords;
         for (const auto &record : _remoteNetworkStateLogRecords) {
             json11::Json::object jsonRecord;
@@ -2628,7 +2623,7 @@ public:
             audioChannel->second->updateActivity();
         }
     }
-    
+
     void updateSsrcActivity(uint32_t ssrc) {
         auto it = _ssrcActivities.find(ChannelId(ssrc));
         if (it != _ssrcActivities.end()) {
@@ -2676,7 +2671,7 @@ public:
             auto myAudioLevel = strong->_myAudioLevel;
             myAudioLevel.isMuted = strong->_isMuted;
             levelsUpdate.updates.push_back(GroupLevelUpdate{ 0, myAudioLevel });
-            
+
             GroupActivitiesUpdate activitiesUpdate;
             activitiesUpdate.updates.reserve(strong->_ssrcActivities.size());
             for (auto &it : strong->_ssrcActivities) {
@@ -3008,11 +3003,11 @@ public:
                 _networkStateUpdated(_effectiveNetworkState);
             }
         }
-        
+
         NetworkStateLogRecord record;
         record.isConnected = effectiveNetworkState.isConnected;
         record.isFailed = false;
-        
+
         if (effectiveNetworkState.isConnected && !_hasBeenConnected) {
             _hasBeenConnected = true;
             auto connectionTimeMs = rtc::TimeMillis() - _startTimestamp;
@@ -3584,7 +3579,7 @@ public:
             std::vector<cricket::Candidate> iceCandidates;
             for (auto const &candidate : parsedTransport.candidates) {
                 rtc::SocketAddress address(candidate.ip, stringToInt(candidate.port));
-                
+
                 std::string candidateType = candidate.type;
                 if (candidateType == "host") {
                     candidateType = "local";
@@ -3685,7 +3680,7 @@ public:
         if (_outgoingAudioChannel) {
             _threads->getWorkerThread()->BlockingCall([this]() {
                 _outgoingAudioChannel->send_channel()->SetAudioSend(_outgoingAudioSsrc, !_isMuted, nullptr, &_audioSource);
-                
+
                 if (_audioDeviceModule) {
                     bool isDeviceMuteAvailable = false;
                     if (_audioDeviceModule->MicrophoneMuteIsAvailable(&isDeviceMuteAvailable) == 0) {
@@ -4033,12 +4028,12 @@ public:
 
         completion(result);
     }
-    
+
     void internal_addCustomNetworkEvent(bool isRemoteConnected) {
         NetworkStateLogRecord record;
         record.isConnected = isRemoteConnected;
         record.isFailed = false;
-        
+
         _remoteNetworkStateLogRecords.emplace_back(rtc::TimeMillis(), std::move(record));
     }
 
@@ -4180,7 +4175,7 @@ private:
 
     std::map<ChannelId, InternalGroupLevelValue> _audioLevels;
     GroupLevelValue _myAudioLevel;
-    
+
     std::map<ChannelId, InternalGroupActivityValue> _ssrcActivities;
 
     bool _isMuted = true;
@@ -4208,7 +4203,7 @@ private:
     absl::optional<int64_t> _broadcastEnabledUntilRtcIsConnectedAtTimestamp;
     bool _isDataChannelOpen = false;
     GroupNetworkState _effectiveNetworkState;
-    
+
     int64_t _startTimestamp = 0;
     bool _hasBeenConnected = false;
 
@@ -4221,7 +4216,7 @@ private:
 
     webrtc::scoped_refptr<webrtc::PendingTaskSafetyFlag> _workerThreadSafery;
     webrtc::scoped_refptr<webrtc::PendingTaskSafetyFlag> _networkThreadSafery;
-    
+
     std::function<void(bool)> _onMutedSpeechActivityDetected;
     
     std::map<int32_t, FrameTransformerPayloadType> _payloadTypeMapping;
