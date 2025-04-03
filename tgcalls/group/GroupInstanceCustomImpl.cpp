@@ -979,6 +979,7 @@ private:
     std::vector<int16_t> _samples;
 };
 
+// Constants for H264 NAL unit types and headers
 static constexpr uint8_t kTypeMask = 0x1F;
 static constexpr uint8_t kFuA = 28;
 static constexpr uint8_t kIdr = 5;
@@ -987,102 +988,145 @@ static constexpr uint8_t kPps = 8;
 static constexpr uint8_t kSei = 6;
 static constexpr uint8_t kStapA = 24;
 static constexpr size_t kNalHeaderSize = 1;
-static constexpr size_t kStapAHeaderSize = 3;
 static constexpr size_t kFuAHeaderSize = 2;
+constexpr size_t kLengthFieldSize = 2;
+constexpr size_t kStapAHeaderSize = kNalHeaderSize + kLengthFieldSize;
 
-// Verifies that all NAL units in a STAP-A are properly sized and fit within `naluLength`.
-bool verifyStapANaluLengths(const uint8_t* buf, size_t naluStart, size_t naluLength) {
-    size_t pos = 0;
-    while (pos + 2 <= naluLength) {
-        // Read 2-byte NAL size
-        uint16_t nalu_size = (static_cast<uint16_t>(buf[naluStart + pos]) << 8) |
-                              static_cast<uint16_t>(buf[naluStart + pos + 1]);
-        pos += 2;
-
-        // Check if nalu_size fits in remaining length
-        if (pos + nalu_size > naluLength) {
-            return false;
-        }
-
-        pos += nalu_size;
+// Calculate bytes needed to include PPS ID in a slice header
+size_t calculateSliceHeaderBytesForPpsId(const uint8_t* data, size_t size) {
+    if (size < 2)
+        return 0;
+        
+    // Convert to RBSP format (remove emulation prevention bytes)
+    std::vector<uint8_t> rbsp = webrtc::H264::ParseRbsp(data, size);
+    if (rbsp.size() < 2)
+        return 0;
+    
+    // Create a bitstream reader for the RBSP data (skipping NAL header)
+    // We need to skip the NAL header (1 byte) but still read from the start of the slice header
+    rtc::ArrayView<const uint8_t> rbspView(rbsp.data() + 1, rbsp.size() - 1);
+    webrtc::BitstreamReader reader(rbspView);
+    
+    // first_mb_in_slice: ue(v)
+    reader.ReadExponentialGolomb();
+    if (!reader.Ok()) {
+        return 4; // Default if parsing fails
     }
-
-    // pos should match exactly naluLength after parsing all NALUs
-    return (pos == naluLength);
+    
+    // slice_type: ue(v)
+    reader.ReadExponentialGolomb();
+    if (!reader.Ok()) {
+        return 4; // Default if parsing fails
+    }
+    
+    // pic_parameter_set_id: ue(v) - THIS IS WHAT WE NEED
+    reader.ReadExponentialGolomb();
+    if (!reader.Ok()) {
+        return 4; // Default if parsing fails
+    }
+    
+    // Calculate how many bytes we've read so far, plus 1 for NAL header
+    // The consumed bits divided by 8 (rounded up) gives us the bytes read
+    size_t bitsConsumed = rbspView.size() * 8 - reader.RemainingBitCount();
+    size_t bytesRead = 1 + (bitsConsumed + 7) / 8; // +1 for NAL header, +7 for ceiling division
+    
+    // Add a margin to ensure we get all the PPS ID data
+    return bytesRead + 1;
 }
 
-static bool parseFuaNaluForKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
-    if (len < kFuAHeaderSize) {
-        return false;
+/**
+ * Calculates the size of the H264 header that needs to remain
+ * unencrypted for Jitsi Videobridge to properly process the packet.
+ *
+ * This function works with WebRTC's Annex B format H.264 frames and ensures
+ * the PPS ID is included in the unencrypted portion.
+ *
+ * @param frame The H264 RTP payload in Annex B format
+ * @return The size of the header that must remain unencrypted
+ */
+uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
+    if (frame.empty()) {
+        return 0;
     }
-    // FU-A header is at buf[off+1]
-    uint8_t fuNalType = buf[off + 1] & kTypeMask;
-    maxOffset = std::max(maxOffset, off + 1 + 1);
-    return (fuNalType == kIdr);
-}
-
-static bool parseSingleNaluForKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
-    if (len < kNalHeaderSize) {
-        return false;
+    
+    // Find all NAL units in the frame
+    std::vector<webrtc::H264::NaluIndex> naluIndices =
+        webrtc::H264::FindNaluIndices(frame.data(), frame.size());
+    
+    if (naluIndices.empty()) {
+        // No valid NAL units found
+        return 0;
     }
-
-    int nalType = buf[off] & kTypeMask;
-    size_t naluStart = off + kNalHeaderSize;
-    size_t naluLength = len - kNalHeaderSize;
-
-    if (nalType == kStapA) {
-        // Check STAP-A header size
-        if (len <= kStapAHeaderSize) {
-            std::cerr << "StapA header truncated." << std::endl;
-            return false;
-        }
-        // Verify STAP-A NAL lengths
-        if (!verifyStapANaluLengths(buf, naluStart, naluLength)) {
-            std::cerr << "StapA packet with incorrect NALU packet lengths." << std::endl;
-            return false;
-        }
-        // After verifying, the first NAL in STAP-A starts at off + kStapAHeaderSize.
-        nalType = buf[off + kStapAHeaderSize] & kTypeMask;
-        maxOffset = std::max(maxOffset, off + kStapAHeaderSize + 1);
-    } else {
-        maxOffset = std::max(maxOffset, off + 1);
-    }
-
-    // Key frames are IDR, SPS, PPS, or SEI NAL units.
-    return (nalType == kIdr || nalType == kSps || nalType == kPps || nalType == kSei);
-}
-
-bool isKeyFrame(const uint8_t* buf, size_t off, size_t len, size_t &maxOffset) {
-    // Basic checks
-    if (!buf || len == 0) {
-        return false;
-    }
-
-    // Ensure we can safely access buf[off]
-    // (Assuming caller guarantees off + len is within buffer)
-    if (len < 1) {
-        return false;
-    }
-
-    int nalType = buf[off] & kTypeMask;
-
-    // Check if FU-A
-    if (nalType == kFuA) {
-        return parseFuaNaluForKeyFrame(buf, off, len, maxOffset);
-    } else {
-        return parseSingleNaluForKeyFrame(buf, off, len, maxOffset);
-    }
-}
-
-uint32_t calculateVideoFramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
+    
+    // Track the maximum offset we need to keep unencrypted
     size_t maxOffset = 0;
-
-    std::vector<webrtc::H264::NaluIndex> naluIndices = webrtc::H264::FindNaluIndices(frame.data(), frame.size());
-    for (const webrtc::H264::NaluIndex &index : naluIndices) {
-        isKeyFrame(frame.begin(), index.payload_start_offset, index.payload_size, maxOffset);
+    
+    for (const auto& naluIndex : naluIndices) {
+        // Start by including the start code and NAL header
+        size_t headerEndOffset = naluIndex.payload_start_offset + kNalHeaderSize;
+        
+        // Check if we have enough data to read the NAL unit type
+        if (naluIndex.payload_size >= kNalHeaderSize) {
+            // Get NAL unit type from the first byte after start code
+            uint8_t nalType = frame[naluIndex.payload_start_offset] & kTypeMask;
+            
+            // Extend header size based on NAL unit type
+            if (nalType == kFuA) {
+                // For fragmented units, we need the FU header as well
+                if (naluIndex.payload_size >= kFuAHeaderSize) {
+                    headerEndOffset = naluIndex.payload_start_offset + kFuAHeaderSize;
+                    
+                    // For the first fragment, we also need to include PPS ID
+                    bool isStartBit = (frame[naluIndex.payload_start_offset + 1] & 0x80) != 0;
+                    if (isStartBit) {
+                        // Get original NAL type from the FU header
+                        uint8_t originalNalType = frame[naluIndex.payload_start_offset + 1] & kTypeMask;
+                        
+                        // If this is an IDR or non-IDR slice, include enough for PPS ID
+                        if (originalNalType == kIdr || originalNalType == 1) {
+                            // Add extra bytes to include PPS ID (typical size: 1-3 bytes after FU header)
+                            headerEndOffset += 4; // Conservative estimate
+                        }
+                    }
+                }
+            } else if (nalType == kStapA) {
+                // For aggregation packets, we need the STAP-A header and first NAL's length field
+                if (naluIndex.payload_size >= kStapAHeaderSize) {
+                    headerEndOffset = naluIndex.payload_start_offset + kStapAHeaderSize;
+                    
+                    // Try to get the type of the first aggregated NAL
+                    if (naluIndex.payload_size > kStapAHeaderSize) {
+                        uint8_t firstNalType = frame[naluIndex.payload_start_offset + kStapAHeaderSize] & kTypeMask;
+                        
+                        // If this is an IDR or non-IDR slice, include enough for PPS ID
+                        if (firstNalType == kIdr || firstNalType == 1) {
+                            // Add extra bytes to include PPS ID
+                            headerEndOffset += 4; // Conservative estimate
+                        }
+                    }
+                }
+            }
+            // For slice NAL units (IDR=5 or non-IDR=1), include PPS ID
+            else if (nalType == kIdr || nalType == 1) {
+                // Calculate bytes needed to include PPS ID
+                size_t ppsIdBytes = calculateSliceHeaderBytesForPpsId(
+                    frame.data() + naluIndex.payload_start_offset,
+                    naluIndex.payload_size);
+                    
+                headerEndOffset = naluIndex.payload_start_offset + ppsIdBytes;
+            }
+            // For keyframe related NAL units, ensure we keep their header
+            else if (nalType == kSps || nalType == kPps || nalType == kSei) {
+                // SPS and PPS need to be kept entirely in plaintext
+                headerEndOffset = naluIndex.payload_start_offset + naluIndex.payload_size;
+            }
+        }
+        
+        // Update the maximum offset
+        maxOffset = std::max(maxOffset, headerEndOffset);
     }
-
-    return (uint32_t)maxOffset;
+    
+    return static_cast<uint32_t>(maxOffset);
 }
 
 // Constants for VP8 Payload Descriptor bits
@@ -1208,7 +1252,7 @@ public:
             if (payloadType == FrameTransformerPayloadType::H264 || payloadType == FrameTransformerPayloadType::VP8) {
                 uint32_t plaintextHeaderSize =  0;
                 if (payloadType == FrameTransformerPayloadType::H264) {
-                    plaintextHeaderSize = calculateVideoFramePlaintextHeaderSize(frame->GetData());
+                    plaintextHeaderSize = calculateH264FramePlaintextHeaderSize(frame->GetData());
                 } else if (payloadType == FrameTransformerPayloadType::VP8) {
                     plaintextHeaderSize = calculateVP8FramePlaintextHeaderSize(frame->GetData());
                 }
@@ -2868,9 +2912,9 @@ public:
             }
         }
         if (enableH264) {
-            if (_e2eEncryptDecrypt) {
+            /*if (_e2eEncryptDecrypt) {
                 defaultCodecPriorities.insert(defaultCodecPriorities.begin() + 1, cricket::kH264CodecName);
-            } else {
+            } else*/ {
                 defaultCodecPriorities.insert(defaultCodecPriorities.begin(), cricket::kH264CodecName);
             }
         }
