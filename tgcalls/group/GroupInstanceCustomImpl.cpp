@@ -1085,11 +1085,89 @@ uint32_t calculateVideoFramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fr
     return (uint32_t)maxOffset;
 }
 
+// Constants for VP8 Payload Descriptor bits
+constexpr uint8_t X_BIT = 0x80;  // Extended control bits present
+constexpr uint8_t I_BIT = 0x80;  // PictureID present
+constexpr uint8_t L_BIT = 0x40;  // TL0PICIDX present
+constexpr uint8_t T_BIT = 0x20;  // TID present
+constexpr uint8_t K_BIT = 0x10;  // KEYIDX present
+constexpr uint8_t M_BIT = 0x80;  // Extended PictureID
+
+/**
+ * Calculates the size of the VP8 Payload Descriptor header that needs to remain
+ * unencrypted for Jitsi Videobridge to properly process the packet.
+ *
+ * This covers the VP8 payload descriptor as per RFC 7741.
+ *
+ * @param frame The VP8 RTP payload (not including the RTP header)
+ * @return The size of the header that must remain unencrypted
+ */
+uint32_t calculateVP8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
+    // Ensure we have at least 1 byte
+    if (frame.empty()) {
+        return 0;
+    }
+    
+    // VP8 payload descriptor is at least 1 byte
+    uint32_t size = 1;
+    
+    // Check if extended control bits are present (X bit)
+    if ((frame[0] & X_BIT) == 0) {
+        return size;  // Only 1 byte if X=0
+    }
+    
+    // If we're here, X=1, so we have at least 2 bytes
+    if (frame.size() < 2) {
+        return size;  // Malformed, but return what we know
+    }
+    
+    size = 2;  // First byte + extension byte
+    
+    uint8_t extension = frame[1];
+    int extOffset = 2;  // Offset to next byte after extension control byte
+    
+    // Check for PictureID (I bit)
+    if ((extension & I_BIT) != 0) {
+        if (frame.size() <= extOffset) {
+            return size;  // Malformed, but return what we know
+        }
+        
+        // Add picture ID size - 1 byte or 2 bytes if M bit is set
+        size++;  // At least 1 byte for PictureID
+        
+        if ((frame[extOffset] & M_BIT) != 0) {
+            size++;  // 2 bytes for extended PictureID
+        }
+        
+        extOffset = size;  // Move offset past PictureID
+    }
+    
+    // Check for TL0PICIDX (L bit)
+    if ((extension & L_BIT) != 0) {
+        size++;  // 1 byte for TL0PICIDX
+    }
+    
+    // Check for TID or KEYIDX (T or K bit)
+    if ((extension & (T_BIT | K_BIT)) != 0) {
+        size++;  // 1 byte for TID/KEYIDX
+    }
+    
+    return size;
+}
+
+enum class FrameTransformerPayloadType {
+    Unknown,
+    Opus,
+    H264,
+    VP8
+};
+
 class FrameTransformer : public webrtc::FrameTransformerInterface {
 public:
-    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> transform) :
+    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> transform, std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping) :
     _isEncryptor(isEncryptor),
-    _transform(transform) {
+    _transform(transform),
+    _payloadTypeMapping(payloadTypeMapping) {
     }
     
     virtual void RegisterTransformedFrameCallback(rtc::scoped_refptr<webrtc::TransformedFrameCallback> callback) override {
@@ -1114,9 +1192,21 @@ public:
             return;
         }
         
+        FrameTransformerPayloadType payloadType = FrameTransformerPayloadType::Unknown;
+        const auto foundPayloadType = _payloadTypeMapping.find(frame->GetPayloadType());
+        if (foundPayloadType != _payloadTypeMapping.end()) {
+            payloadType = foundPayloadType->second;
+        }
+        
         if (_isEncryptor) {
-            if (frame->GetPayloadType() != 111) { // non-opus
-                uint32_t plaintextHeaderSize = calculateVideoFramePlaintextHeaderSize(frame->GetData());
+            if (payloadType == FrameTransformerPayloadType::H264 || payloadType == FrameTransformerPayloadType::VP8) {
+                uint32_t plaintextHeaderSize =  0;
+                if (payloadType == FrameTransformerPayloadType::H264) {
+                    plaintextHeaderSize = calculateVideoFramePlaintextHeaderSize(frame->GetData());
+                } else if (payloadType == FrameTransformerPayloadType::VP8) {
+                    plaintextHeaderSize = calculateVP8FramePlaintextHeaderSize(frame->GetData());
+                }
+                
                 if (plaintextHeaderSize > (uint32_t)frame->GetData().size()) {
                     plaintextHeaderSize = (uint32_t)frame->GetData().size();
                 }
@@ -1164,7 +1254,7 @@ public:
                 }
             }
         } else {
-            if (frame->GetPayloadType() != 111) { // non-opus
+            if (payloadType != FrameTransformerPayloadType::Opus) {
                 if (frame->GetData().size() < 4) {
                     return;
                 }
@@ -1220,6 +1310,7 @@ public:
 private:
     bool _isEncryptor;
     std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> _transform;
+    std::map<int32_t, FrameTransformerPayloadType> _payloadTypeMapping;
     webrtc::Mutex _mutex;
     rtc::scoped_refptr<webrtc::TransformedFrameCallback> _sinkCallback;
 };
@@ -1236,14 +1327,15 @@ public:
         std::function<void(AudioSinkImpl::Update)> &&onAudioLevelUpdated,
         std::function<void(uint32_t, const AudioFrame &)> onAudioFrame,
         std::shared_ptr<Threads> threads,
-        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt) :
+        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt,
+        std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping) :
     _threads(threads),
     _ssrc(ssrc),
     _channelManager(channelManager),
     _call(call) {
         _creationTimestamp = rtc::TimeMillis();
 
-        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, e2eEncryptDecrypt]() mutable {
+        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, e2eEncryptDecrypt, payloadTypeMapping]() mutable {
             cricket::AudioOptions audioOptions;
             audioOptions.audio_jitter_buffer_fast_accelerate = true;
             audioOptions.audio_jitter_buffer_min_delay_ms = 50;
@@ -1300,7 +1392,7 @@ public:
             incomingAudioDescription.reset();
             
             if (e2eEncryptDecrypt) {
-                _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt));
+                _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, payloadTypeMapping));
             }
 
             if (_ssrc.actualSsrc != 1) {
@@ -1367,7 +1459,8 @@ public:
         VideoChannelDescription::Quality maxQuality,
         GroupParticipantVideoInformation const &description,
         std::shared_ptr<Threads> threads,
-        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt) :
+        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, bool)> e2eEncryptDecrypt,
+        std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping) :
     _threads(threads),
     _endpointId(description.endpointId),
     _channelManager(channelManager),
@@ -1376,7 +1469,7 @@ public:
     _requestedMaxQuality(maxQuality) {
         _videoSink.reset(new VideoSinkImpl(_endpointId));
 
-        _threads->getWorkerThread()->BlockingCall([this, rtpTransport, &availableVideoFormats, &description, randomIdGenerator, e2eEncryptDecrypt]() mutable {
+        _threads->getWorkerThread()->BlockingCall([this, rtpTransport, &availableVideoFormats, &description, randomIdGenerator, e2eEncryptDecrypt, payloadTypeMapping]() mutable {
             uint32_t mid = randomIdGenerator->GenerateId();
             std::string streamId = std::string("video") + uint32ToString(mid);
 
@@ -1458,7 +1551,7 @@ public:
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
             
             if (e2eEncryptDecrypt) {
-                _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt));
+                _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, payloadTypeMapping));
             }
         });
 
@@ -1987,6 +2080,16 @@ public:
         peerConnectionFactoryDeps.adm = _audioDeviceModule;
 
         _availableVideoFormats = filterSupportedVideoFormats(peerConnectionFactoryDeps.video_encoder_factory->GetSupportedFormats());
+        
+        _payloadTypeMapping.insert(std::make_pair(111, FrameTransformerPayloadType::Opus));
+        auto tempVideoPayloadTypes = assignPayloadTypes(_availableVideoFormats);
+        for (const auto &it : tempVideoPayloadTypes) {
+            if (it.videoCodec.name == cricket::kVp8CodecName) {
+                _payloadTypeMapping.insert(std::make_pair(it.videoCodec.id, FrameTransformerPayloadType::VP8));
+            } else if (it.videoCodec.name == cricket::kH264CodecName) {
+                _payloadTypeMapping.insert(std::make_pair(it.videoCodec.id, FrameTransformerPayloadType::H264));
+            }
+        }
 
         webrtc::EnableMedia(peerConnectionFactoryDeps);
 
@@ -2212,7 +2315,7 @@ public:
             
             if (_e2eEncryptDecrypt) {
                 for (auto ssrc : simulcastGroupSsrcs) {
-                    _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt));
+                    _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, _payloadTypeMapping));
                 }
             }
         });
@@ -2409,7 +2512,7 @@ public:
             _outgoingAudioChannel->SetPayloadTypeDemuxingEnabled(false);
             
             if (_e2eEncryptDecrypt) {
-                _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt));
+                _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, _payloadTypeMapping));
             }
         });
 
@@ -2770,7 +2873,11 @@ public:
             }
         }
         if (enableH264) {
-            defaultCodecPriorities.insert(defaultCodecPriorities.begin(), cricket::kH264CodecName);
+            if (_e2eEncryptDecrypt) {
+                defaultCodecPriorities.insert(defaultCodecPriorities.begin() + 1, cricket::kH264CodecName);
+            } else {
+                defaultCodecPriorities.insert(defaultCodecPriorities.begin(), cricket::kH264CodecName);
+            }
         }
 
         for (const auto &name : defaultCodecPriorities) {
@@ -3545,7 +3652,8 @@ public:
             VideoChannelDescription::Quality::Thumbnail,
             videoInformation,
             _threads,
-            _e2eEncryptDecrypt
+            _e2eEncryptDecrypt,
+            _payloadTypeMapping
         ));
 
         ChannelSsrcInfo mapping;
@@ -3709,7 +3817,8 @@ public:
             std::move(onAudioSinkUpdate),
             _onAudioFrame,
             _threads,
-            _e2eEncryptDecrypt
+            _e2eEncryptDecrypt,
+            _payloadTypeMapping
         ));
 
         auto volume = _volumeBySsrc.find(ssrc.actualSsrc);
@@ -3780,7 +3889,8 @@ public:
             maxQuality,
             videoInformation,
             _threads,
-            _e2eEncryptDecrypt
+            _e2eEncryptDecrypt,
+            _payloadTypeMapping
         ));
 
         const auto pendingSinks = _pendingVideoSinks.find(VideoChannelId(videoInformation.endpointId));
@@ -4113,6 +4223,8 @@ private:
     webrtc::scoped_refptr<webrtc::PendingTaskSafetyFlag> _networkThreadSafery;
     
     std::function<void(bool)> _onMutedSpeechActivityDetected;
+    
+    std::map<int32_t, FrameTransformerPayloadType> _payloadTypeMapping;
 };
 
 GroupInstanceCustomImpl::GroupInstanceCustomImpl(GroupInstanceDescriptor &&descriptor) {
