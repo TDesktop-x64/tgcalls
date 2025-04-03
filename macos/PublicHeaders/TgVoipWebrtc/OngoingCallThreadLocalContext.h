@@ -277,12 +277,13 @@ typedef NS_ENUM(int32_t, OngoingGroupCallMediaChannelType) {
 };
 
 @interface OngoingGroupCallMediaChannelDescription : NSObject
-
 @property (nonatomic, readonly) OngoingGroupCallMediaChannelType type;
+@property (nonatomic, readonly) uint64_t peerId;
 @property (nonatomic, readonly) uint32_t audioSsrc;
 @property (nonatomic, strong, readonly) NSString * _Nullable videoDescription;
 
 - (instancetype _Nonnull)initWithType:(OngoingGroupCallMediaChannelType)type
+    peerId:(int64_t)peerId
     audioSsrc:(uint32_t)audioSsrc
     videoDescription:(NSString * _Nullable)videoDescription;
 
@@ -397,9 +398,9 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
     logPath:(NSString * _Nonnull)logPath
     statsLogPath:(NSString * _Nonnull)statsLogPath
     audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
-    encryptionKey:(NSData * _Nullable)encryptionKey
     isConference:(bool)isConference
-    isActiveByDefault:(bool)isActiveByDefault;
+    isActiveByDefault:(bool)isActiveByDefault
+    encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, bool))encryptDecrypt;
 
 - (void)stop:(void (^ _Nullable)())completion;
 
