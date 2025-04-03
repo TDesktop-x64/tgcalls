@@ -41,6 +41,7 @@
 #include "p2p/client/basic_port_allocator.h"
 #include "p2p/base/basic_packet_socket_factory.h"
 #include "rtc_base/network.h"
+#include "p2p/base/default_ice_transport_factory.h"
 
 #include "AudioFrame.h"
 #include "ThreadLocalObject.h"
@@ -650,6 +651,7 @@ public:
         peerConnectionConfiguration.enable_implicit_rollback = true;
         peerConnectionConfiguration.continual_gathering_policy = webrtc::PeerConnectionInterface::ContinualGatheringPolicy::GATHER_CONTINUALLY;
         peerConnectionConfiguration.audio_jitter_buffer_fast_accelerate = true;
+        peerConnectionConfiguration.prioritize_most_likely_ice_candidate_pairs = true;
 
         for (auto &server : _rtcServers) {
             if (server.isTcp) {

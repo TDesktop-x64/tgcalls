@@ -642,7 +642,7 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
     cricket::IceConfig iceConfig;
     iceConfig.continual_gathering_policy = cricket::GATHER_CONTINUALLY;
     iceConfig.prioritize_most_likely_candidate_pairs = true;
-    iceConfig.regather_on_failed_networks_interval = 8000;
+    iceConfig.regather_on_failed_networks_interval = cricket::REGATHER_ON_FAILED_NETWORKS_INTERVAL;
     
     if (getCustomParameterBool(_customParameters, "network_skip_initial_ping")) {
         iceConfig.presume_writable_when_fully_relayed = true;

@@ -186,7 +186,7 @@ void NetworkManager::start() {
     cricket::IceConfig iceConfig;
     iceConfig.continual_gathering_policy = cricket::GATHER_CONTINUALLY;
     iceConfig.prioritize_most_likely_candidate_pairs = true;
-    iceConfig.regather_on_failed_networks_interval = 8000;
+    iceConfig.regather_on_failed_networks_interval = cricket::REGATHER_ON_FAILED_NETWORKS_INTERVAL;
     _transportChannel->SetIceConfig(iceConfig);
 
     cricket::IceParameters localIceParameters(
