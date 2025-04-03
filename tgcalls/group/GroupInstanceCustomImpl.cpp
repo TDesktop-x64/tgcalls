@@ -1129,27 +1129,26 @@ uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fra
     return static_cast<uint32_t>(maxOffset);
 }
 
-// Constants for VP8 Payload Descriptor bits
-constexpr uint8_t X_BIT = 0x80;  // Extension bit
-constexpr uint8_t N_BIT = 0x20;  // Non-reference bit
-constexpr uint8_t S_BIT = 0x10;  // Start of partition bit
-constexpr uint8_t PID_MASK = 0x07;  // Partition ID mask
-
-// Extension field bits (second byte, if X_BIT is set)
-constexpr uint8_t I_BIT = 0x80;  // PictureID present
-constexpr uint8_t L_BIT = 0x40;  // TL0PICIDX present
-constexpr uint8_t T_BIT = 0x20;  // TID present
-constexpr uint8_t K_BIT = 0x10;  // KEYIDX present
-constexpr uint8_t M_BIT = 0x80;  // Extended PictureID
+// VP8 Payload Header constants
+constexpr uint8_t P_BIT = 0x01;  // Inverse key frame flag (0=key frame, 1=delta frame)
+                                // In bit position 0
 
 /**
- * Calculates the size of the VP8 Payload Descriptor header that needs to remain
- * unencrypted for Jitsi Videobridge to properly process the packet.
+ * Calculates the size of the VP8 header that needs to remain
+ * unencrypted for proper frame handling.
  *
- * Based on the WebRTC VP8 payload descriptor format defined in RFC 7741:
- * https://datatracker.ietf.org/doc/html/rfc7741#section-4.2
+ * For VP8:
+ * - If it's a key frame (P=0), leave 10 bytes unencrypted to cover the full uncompressed VP8 header
+ * - If it's a delta frame (P=1), leave 1 byte unencrypted (just the payload header)
  *
- * @param frame The VP8 RTP payload
+ * Based on VP8 payload header format in RFC 7741 section 4.3:
+ *     0 1 2 3 4 5 6 7
+ *    +-+-+-+-+-+-+-+-+
+ *    |Size0|H| VER |P|
+ *    +-+-+-+-+-+-+-+-+
+ * The diagram shows bit positions where P is at position 7 (leftmost bit).
+ *
+ * @param frame The VP8 payload data (after RTP header and VP8 payload descriptor)
  * @return The size of the header that must remain unencrypted
  */
 uint32_t calculateVp8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
@@ -1157,76 +1156,21 @@ uint32_t calculateVp8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fram
     if (frame.empty()) {
         return 0;
     }
-
-    // The mandatory first byte of the VP8 payload descriptor
+    
+    // First byte of VP8 payload header
     uint8_t first_byte = frame[0];
-    bool extension = (first_byte & X_BIT) != 0;
-    bool start_of_partition = (first_byte & S_BIT) != 0;
-    uint8_t partition_id = first_byte & PID_MASK;
-
-    // VP8 payload descriptor is at least 1 byte
-    uint32_t size = 1;
-
-    // No extension field, just return the first byte size
-    if (!extension) {
-        return size;
+    
+    // Check P bit (inverse key frame flag) - bit 7 (0x80)
+    bool is_key_frame = (first_byte & P_BIT) == 0;
+    
+    if (is_key_frame) {
+        // For key frames, leave 10 bytes unencrypted to cover the full uncompressed VP8 header
+        // This includes the frame dimensions
+        return frame.size() >= 10 ? 10 : ((uint32_t)frame.size());
+    } else {
+        // For delta frames, just leave 1 byte unencrypted (payload header)
+        return 1;
     }
-
-    // If we're here, X=1, so we have at least 2 bytes
-    if (frame.size() < 2) {
-        return size;  // Malformed, but return what we know
-    }
-
-    // Process the extension byte
-    uint8_t extension_byte = frame[1];
-    size = 2;  // First byte + extension byte
-
-    // Process optional fields based on extension byte flags
-    size_t offset = 2;
-
-    // Check for PictureID (I bit)
-    if ((extension_byte & I_BIT) != 0) {
-        if (frame.size() <= offset) {
-            return size;  // Malformed, but return what we know
-        }
-
-        // PictureID is 1 or 2 bytes
-        size++;  // At least 1 byte for PictureID
-
-        // If M bit is set, PictureID is 15 bits (2 bytes)
-        if ((frame[offset] & M_BIT) != 0 && frame.size() > offset + 1) {
-            size++;  // 2 bytes for extended PictureID
-        }
-
-        offset = size;  // Move offset past PictureID
-    }
-
-    // Check for TL0PICIDX (L bit)
-    if ((extension_byte & L_BIT) != 0) {
-        if (frame.size() <= offset) {
-            return size;  // Malformed, but return what we know
-        }
-        size++;  // 1 byte for TL0PICIDX
-        offset++;
-    }
-
-    // Check for TID or KEYIDX (T or K bit)
-    if ((extension_byte & (T_BIT | K_BIT)) != 0) {
-        if (frame.size() <= offset) {
-            return size;  // Malformed, but return what we know
-        }
-        size++;  // 1 byte for TID/KEYIDX
-    }
-
-    // For VP8, we also need the first byte of the payload header if this
-    // is the start of a partition with partition ID 0 (to check keyframe)
-    if (start_of_partition && partition_id == 0 && frame.size() > size) {
-        // Include one more byte (first byte of VP8 payload header)
-        // The P bit (0x01) indicates if it's a key frame (when 0) or delta frame (when 1)
-        size++;
-    }
-
-    return size;
 }
 
 enum class FrameTransformerPayloadType {
@@ -2238,6 +2182,8 @@ public:
             strong->writeStateLogRecords();
 
             strong->beginLogTimer(1000);
+            
+            //strong->generateVideoKeyframe();
         }, webrtc::TimeDelta::Millis(delayMs));
     }
 
@@ -2498,6 +2444,19 @@ public:
             } else {
                 _outgoingVideoChannel->send_channel()->SetVideoSend(_outgoingVideoSsrcs.simulcastLayers[0].ssrc, nullptr, nullptr);
             }
+        });
+    }
+    
+    void generateVideoKeyframe() {
+        if (!_outgoingVideoChannel) {
+            return;
+        }
+        _threads->getWorkerThread()->BlockingCall([this]() {
+            auto sendChannel = _outgoingVideoChannel->send_channel();
+            if (!sendChannel) {
+                return;
+            }
+            sendChannel->GenerateSendKeyFrame(_outgoingVideoSsrcs.simulcastLayers[0].ssrc, {});
         });
     }
 
