@@ -400,7 +400,7 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
     audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
     isConference:(bool)isConference
     isActiveByDefault:(bool)isActiveByDefault
-    encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, bool))encryptDecrypt;
+    encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, bool))encryptDecrypt;
 
 - (void)stop:(void (^ _Nullable)())completion;
 
