@@ -1402,7 +1402,7 @@ private:
     videoContentType:(OngoingGroupCallVideoContentType)videoContentType
     enableNoiseSuppression:(bool)enableNoiseSuppression
     disableAudioInput:(bool)disableAudioInput
-    preferX264:(bool)preferX264
+    prioritizeVP8:(bool)prioritizeVP8
     logPath:(NSString * _Nonnull)logPath
 statsLogPath:(NSString * _Nonnull)statsLogPath
 audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
@@ -1413,7 +1413,7 @@ encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, bool))encryp
     if (self != nil) {
         _queue = queue;
         
-        tgcalls::PlatformInterface::SharedInstance()->preferX264 = preferX264;
+        tgcalls::PlatformInterface::SharedInstance()->preferX264 = prioritizeVP8;
 
         _sinks = [[NSMutableDictionary alloc] init];
         
@@ -1466,6 +1466,9 @@ encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, bool))encryp
 #endif
         
         std::vector<tgcalls::VideoCodecName> videoCodecPreferences;
+        if (prioritizeVP8) {
+            videoCodecPreferences.push_back(tgcalls::VideoCodecName::VP8);
+        }
 
         int minOutgoingVideoBitrateKbit = 500;
         bool disableOutgoingAudioProcessing = false;
