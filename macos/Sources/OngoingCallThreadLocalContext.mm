@@ -1817,6 +1817,7 @@ encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, boo
         for (OngoingGroupCallRequestedVideoChannel *channel : requestedVideoChannels) {
             tgcalls::VideoChannelDescription description;
             description.audioSsrc = channel.audioSsrc;
+            description.userId = channel.userId;
             description.endpointId = channel.endpointId.UTF8String ?: "";
             for (OngoingGroupCallSsrcGroup *group in channel.ssrcGroups) {
                 tgcalls::MediaSsrcGroup parsedGroup;
@@ -2054,10 +2055,11 @@ encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, boo
 
 @implementation OngoingGroupCallRequestedVideoChannel
 
-- (instancetype)initWithAudioSsrc:(uint32_t)audioSsrc endpointId:(NSString * _Nonnull)endpointId ssrcGroups:(NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull)ssrcGroups minQuality:(OngoingGroupCallRequestedVideoQuality)minQuality maxQuality:(OngoingGroupCallRequestedVideoQuality)maxQuality {
+- (instancetype)initWithAudioSsrc:(uint32_t)audioSsrc userId:(int64_t)userId endpointId:(NSString * _Nonnull)endpointId ssrcGroups:(NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull)ssrcGroups minQuality:(OngoingGroupCallRequestedVideoQuality)minQuality maxQuality:(OngoingGroupCallRequestedVideoQuality)maxQuality {
     self = [super init];
     if (self != nil) {
         _audioSsrc = audioSsrc;
+        _userId = userId;
         _endpointId = endpointId;
         _ssrcGroups = ssrcGroups;
         _minQuality = minQuality;
@@ -2067,6 +2069,7 @@ encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, boo
 }
 
 @end
+
 
 @implementation OngoingGroupCallIncomingVideoStats
 
