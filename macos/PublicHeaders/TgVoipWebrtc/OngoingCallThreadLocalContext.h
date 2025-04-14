@@ -348,13 +348,14 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
 @interface OngoingGroupCallRequestedVideoChannel : NSObject
 
 @property (nonatomic, readonly) uint32_t audioSsrc;
+@property (nonatomic, readonly) int64_t userId;
 @property (nonatomic, strong, readonly) NSString * _Nonnull endpointId;
 @property (nonatomic, strong, readonly) NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull ssrcGroups;
 
 @property (nonatomic, readonly) OngoingGroupCallRequestedVideoQuality minQuality;
 @property (nonatomic, readonly) OngoingGroupCallRequestedVideoQuality maxQuality;
 
-- (instancetype _Nonnull)initWithAudioSsrc:(uint32_t)audioSsrc endpointId:(NSString * _Nonnull)endpointId ssrcGroups:(NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull)ssrcGroups minQuality:(OngoingGroupCallRequestedVideoQuality)minQuality maxQuality:(OngoingGroupCallRequestedVideoQuality)maxQuality;
+- (instancetype _Nonnull)initWithAudioSsrc:(uint32_t)audioSsrc  userId:(int64_t)userId endpointId:(NSString * _Nonnull)endpointId ssrcGroups:(NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull)ssrcGroups minQuality:(OngoingGroupCallRequestedVideoQuality)minQuality maxQuality:(OngoingGroupCallRequestedVideoQuality)maxQuality;
 
 @end
 
@@ -400,7 +401,7 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
     audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
     isConference:(bool)isConference
     isActiveByDefault:(bool)isActiveByDefault
-    encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, bool))encryptDecrypt;
+    encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, bool))encryptDecrypt;
 
 - (void)stop:(void (^ _Nullable)())completion;
 
