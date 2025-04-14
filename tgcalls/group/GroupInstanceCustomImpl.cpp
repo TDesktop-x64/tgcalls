@@ -1114,6 +1114,7 @@ uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fra
                     naluIndex.payload_size);
 
                 headerEndOffset = naluIndex.payload_start_offset + ppsIdBytes;
+                break;
             }
             // For keyframe related NAL units, ensure we keep their header
             else if (nalType == kSps || nalType == kPps || nalType == kSei) {
