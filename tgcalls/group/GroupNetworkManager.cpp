@@ -70,18 +70,11 @@ static void updateHeaderWithVoiceActivity(rtc::CopyOnWriteBuffer *packet, const 
             if (zeroAudioLevel) {
                 float mappedLevel = pow(10.0f, -audioLevel / 20.0f);
                 if (mappedLevel < 0.05f) {
-                    mappedLevel = 0.0f;
+                    audioLevel = 127;
                 } else if (mappedLevel < 0.8f) {
-                    mappedLevel = 0.5f;
+                    audioLevel = 20;
                 } else {
-                    mappedLevel = 1.0f;
-                }
-                
-                if (mappedLevel > 0.0f) {
-                    float dBov = 20.0f * log10(mappedLevel);
-                    audioLevel = static_cast<uint8_t>(std::clamp(static_cast<int>(-dBov), 0, 127));
-                } else {
-                    audioLevel = 127; // Minimum level (-127 dBov)
+                    audioLevel = 0;
                 }
             }
             bool parsedVoiceActivity = (ptr[0] & 0x80) != 0;
