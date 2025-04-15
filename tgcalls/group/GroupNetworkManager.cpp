@@ -33,7 +33,7 @@ enum {
     kRtpMinParseLength = 12
 };
 
-static void updateHeaderWithVoiceActivity(rtc::CopyOnWriteBuffer *packet, const uint8_t* ptrRTPDataExtensionEnd, const uint8_t* ptr, bool voiceActivity) {
+static void updateHeaderWithVoiceActivity(rtc::CopyOnWriteBuffer *packet, const uint8_t* ptrRTPDataExtensionEnd, const uint8_t* ptr, bool voiceActivity, bool zeroAudioLevel) {
     while (ptrRTPDataExtensionEnd - ptr > 0) {
         //  0
         //  0 1 2 3 4 5 6 7
@@ -67,6 +67,23 @@ static void updateHeaderWithVoiceActivity(rtc::CopyOnWriteBuffer *packet, const 
 
         if (id == 1) { // kAudioLevelUri
             uint8_t audioLevel = ptr[0] & 0x7f;
+            if (zeroAudioLevel) {
+                float mappedLevel = pow(10.0f, -audioLevel / 20.0f);
+                if (mappedLevel < 0.05f) {
+                    mappedLevel = 0.0f;
+                } else if (mappedLevel < 0.8f) {
+                    mappedLevel = 0.5f;
+                } else {
+                    mappedLevel = 1.0f;
+                }
+                
+                if (mappedLevel > 0.0f) {
+                    float dBov = 20.0f * log10(mappedLevel);
+                    audioLevel = static_cast<uint8_t>(std::clamp(static_cast<int>(-dBov), 0, 127));
+                } else {
+                    audioLevel = 127; // Minimum level (-127 dBov)
+                }
+            }
             bool parsedVoiceActivity = (ptr[0] & 0x80) != 0;
 
             if (parsedVoiceActivity != voiceActivity) {
@@ -129,7 +146,7 @@ static void readHeaderVoiceActivity(const uint8_t* ptrRTPDataExtensionEnd, const
 #endif
 
 
-static void maybeUpdateRtpVoiceActivity(rtc::CopyOnWriteBuffer *packet, bool voiceActivity) {
+static void maybeUpdateRtpVoiceActivity(rtc::CopyOnWriteBuffer *packet, bool voiceActivity, bool zeroAudioLevel) {
     const uint8_t *_ptrRTPDataBegin = packet->data();
     const uint8_t *_ptrRTPDataEnd = packet->data() + packet->size();
 
@@ -199,7 +216,7 @@ static void maybeUpdateRtpVoiceActivity(rtc::CopyOnWriteBuffer *packet, bool voi
       static constexpr uint16_t kRtpOneByteHeaderExtensionId = 0xBEDE;
       if (definedByProfile == kRtpOneByteHeaderExtensionId) {
           const uint8_t* ptrRTPDataExtensionEnd = ptr + XLen;
-          updateHeaderWithVoiceActivity(packet, ptrRTPDataExtensionEnd, ptr, voiceActivity);
+          updateHeaderWithVoiceActivity(packet, ptrRTPDataExtensionEnd, ptr, voiceActivity, zeroAudioLevel);
       }
     }
 }
@@ -287,16 +304,17 @@ public:
     bool _voiceActivity = false;
 
 public:
-    WrappedDtlsSrtpTransport(bool rtcp_mux_enabled, const webrtc::FieldTrialsView& fieldTrials, std::function<void(webrtc::RtpPacketReceived const &, bool)> &&processRtpPacket) :
+    WrappedDtlsSrtpTransport(bool rtcp_mux_enabled, const webrtc::FieldTrialsView& fieldTrials, std::function<void(webrtc::RtpPacketReceived const &, bool)> &&processRtpPacket, bool zeroAudioLevel) :
     webrtc::DtlsSrtpTransport(rtcp_mux_enabled, fieldTrials),
-    _processRtpPacket(std::move(processRtpPacket)) {
+    _processRtpPacket(std::move(processRtpPacket)),
+    _zeroAudioLevel(zeroAudioLevel) {
     }
 
     virtual ~WrappedDtlsSrtpTransport() {
     }
 
     bool SendRtpPacket(rtc::CopyOnWriteBuffer *packet, const rtc::PacketOptions& options, int flags) override {
-        maybeUpdateRtpVoiceActivity(packet, _voiceActivity);
+        maybeUpdateRtpVoiceActivity(packet, _voiceActivity, _zeroAudioLevel);
         return webrtc::DtlsSrtpTransport::SendRtpPacket(packet, options, flags);
     }
     
@@ -306,6 +324,7 @@ public:
 
 private:
     std::function<void(webrtc::RtpPacketReceived const &, bool)> _processRtpPacket;
+    bool _zeroAudioLevel;
 };
 
 webrtc::CryptoOptions GroupNetworkManager::getDefaulCryptoOptions() {
@@ -322,6 +341,7 @@ GroupNetworkManager::GroupNetworkManager(
     std::function<void(bool)> dataChannelStateUpdated,
     std::function<void(std::string const &)> dataChannelMessageReceived,
     std::function<void(uint32_t, uint8_t, bool)> audioActivityUpdated,
+    bool zeroAudioLevel,
     std::function<void(uint32_t)> anyActivityUpdated,
     std::shared_ptr<Threads> threads) :
 _threads(std::move(threads)),
@@ -330,6 +350,7 @@ _unknownSsrcPacketReceived(std::move(unknownSsrcPacketReceived)),
 _dataChannelStateUpdated(dataChannelStateUpdated),
 _dataChannelMessageReceived(dataChannelMessageReceived),
 _audioActivityUpdated(audioActivityUpdated),
+_zeroAudioLevel(zeroAudioLevel),
 _anyActivityUpdated(anyActivityUpdated) {
     assert(_threads->getNetworkThread()->IsCurrent());
 
@@ -345,7 +366,7 @@ _anyActivityUpdated(anyActivityUpdated) {
 
     _dtlsSrtpTransport = std::make_unique<WrappedDtlsSrtpTransport>(true, fieldTrials, [this](webrtc::RtpPacketReceived const &packet, bool isUnresolved) {
         this->RtpPacketReceived_n(packet, isUnresolved);
-    });
+    }, _zeroAudioLevel);
     _dtlsSrtpTransport->SetDtlsTransports(nullptr, nullptr);
     _dtlsSrtpTransport->SetActiveResetSrtpParams(false);
     _dtlsSrtpTransport->SubscribeReadyToSend(this, [this](bool value) {

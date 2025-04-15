@@ -979,6 +979,48 @@ private:
     std::vector<int16_t> _samples;
 };
 
+class MyAudioLevelHolder {
+public:
+    MyAudioLevelHolder() {
+    }
+
+    void set(GroupLevelValue value) {
+        webrtc::MutexLock lock(&_mutex);
+        _value = value;
+    }
+    
+    GroupLevelValue get() {
+        webrtc::MutexLock lock(&_mutex);
+        return _value;
+    }
+
+private:
+    webrtc::Mutex _mutex;
+    GroupLevelValue _value;
+};
+
+class AudioLevelAndSpeechHolder {
+public:
+    AudioLevelAndSpeechHolder() {
+    }
+
+    void set(uint8_t audioLevel, bool hasSpeech) {
+        webrtc::MutexLock lock(&_mutex);
+        _audioLevel = audioLevel;
+        _hasSpeech = hasSpeech;
+    }
+
+    std::pair<uint8_t, bool> get() {
+        webrtc::MutexLock lock(&_mutex);
+        return std::make_pair(_audioLevel, _hasSpeech);
+    }
+
+private:
+    webrtc::Mutex _mutex;
+    uint8_t _audioLevel = 0;
+    bool _hasSpeech = false;
+};
+
 // Constants for H264 NAL unit types and headers
 static constexpr uint8_t kTypeMask = 0x1F;
 static constexpr uint8_t kFuA = 28;
@@ -1183,11 +1225,13 @@ enum class FrameTransformerPayloadType {
 
 class FrameTransformer : public webrtc::FrameTransformerInterface {
 public:
-    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> transform, int64_t userId, std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping) :
+    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> transform, int64_t userId, std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping, std::function<std::pair<uint8_t, bool>()> getAudioLevelAndSpeech, std::function<void(uint8_t, bool)> setAudioLevelAndSpeech) :
     _isEncryptor(isEncryptor),
     _transform(transform),
     _userId(userId),
-    _payloadTypeMapping(payloadTypeMapping) {
+    _payloadTypeMapping(payloadTypeMapping),
+    _getAudioLevelAndSpeech(getAudioLevelAndSpeech),
+    _setAudioLevelAndSpeech(setAudioLevelAndSpeech) {
     }
 
     virtual void RegisterTransformedFrameCallback(rtc::scoped_refptr<webrtc::TransformedFrameCallback> callback) override {
@@ -1265,8 +1309,22 @@ public:
                 }
             } else {
                 std::vector<uint8_t> buffer;
-                buffer.resize(frame->GetData().size());
+                buffer.resize(frame->GetData().size() + 4 + 1);
                 std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.begin());
+                
+                uint32_t versionMagic = 0xabcd1234;
+                memcpy(buffer.data() + buffer.size() - 1 - 4, &versionMagic, 4);
+                std::pair<uint8_t, bool> audioLevelAndSpeech = std::make_pair(0, false);
+                if (_getAudioLevelAndSpeech) {
+                    audioLevelAndSpeech = _getAudioLevelAndSpeech();
+                }
+                uint8_t encodedAudioLevelAndSpeech = 0;
+                if (audioLevelAndSpeech.second) {
+                    encodedAudioLevelAndSpeech = encodedAudioLevelAndSpeech | 0x80;
+                }
+                encodedAudioLevelAndSpeech |= audioLevelAndSpeech.first & 0x7f;
+                buffer[buffer.size() - 1] = encodedAudioLevelAndSpeech;
+                
                 auto result = _transform(buffer, _userId, _isEncryptor);
                 if (!result.empty()) {
                     frame->SetData(result);
@@ -1312,8 +1370,24 @@ public:
                 std::vector<uint8_t> buffer;
                 buffer.resize(frame->GetData().size());
                 std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.begin());
+                
                 auto result = _transform(buffer, _userId, _isEncryptor);
                 if (!result.empty()) {
+                    if (result.size() >= 5) {
+                        uint32_t versionMagic = 0;
+                        memcpy(&versionMagic, result.data() + result.size() - 5, 4);
+                        if (versionMagic == 0xabcd1234) {
+                            uint8_t audioLevelAndSpeech = result[result.size() - 1];
+                            if (_setAudioLevelAndSpeech) {
+                                bool hasSpeech = (audioLevelAndSpeech & 0x80) != 0;
+                                uint8_t audioLevel = audioLevelAndSpeech & 0x7f;
+                                _setAudioLevelAndSpeech(audioLevel, hasSpeech);
+                            }
+
+                            result.resize(result.size() - 5);
+                        }
+                    }
+                    
                     frame->SetData(result);
                     sink->OnTransformedFrame(std::move(frame));
                 }
@@ -1326,6 +1400,8 @@ private:
     std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> _transform;
     int64_t _userId = 0;
     std::map<int32_t, FrameTransformerPayloadType> _payloadTypeMapping;
+    std::function<std::pair<uint8_t, bool>()> _getAudioLevelAndSpeech;
+    std::function<void(uint8_t, bool)> _setAudioLevelAndSpeech;
     webrtc::Mutex _mutex;
     rtc::scoped_refptr<webrtc::TransformedFrameCallback> _sinkCallback;
     std::map<uint32_t, rtc::scoped_refptr<webrtc::TransformedFrameCallback>> _sinkCallbackBySsrc;
@@ -1345,14 +1421,15 @@ public:
         std::function<void(uint32_t, const AudioFrame &)> onAudioFrame,
         std::shared_ptr<Threads> threads,
         std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> e2eEncryptDecrypt,
-        std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping) :
+        std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping,
+        std::function<void(uint32_t, uint8_t, bool)> setAudioLevelAndSpeech) :
     _threads(threads),
     _ssrc(ssrc),
     _channelManager(channelManager),
     _call(call) {
         _creationTimestamp = rtc::TimeMillis();
 
-        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, userId, e2eEncryptDecrypt, payloadTypeMapping]() mutable {
+        threads->getWorkerThread()->BlockingCall([this, rtpTransport, ssrc, onAudioFrame = std::move(onAudioFrame), onAudioLevelUpdated = std::move(onAudioLevelUpdated), isRawPcm, userId, e2eEncryptDecrypt, payloadTypeMapping, setAudioLevelAndSpeech]() mutable {
             cricket::AudioOptions audioOptions;
             audioOptions.audio_jitter_buffer_fast_accelerate = true;
             audioOptions.audio_jitter_buffer_min_delay_ms = 50;
@@ -1409,7 +1486,9 @@ public:
             incomingAudioDescription.reset();
 
             if (e2eEncryptDecrypt) {
-                _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, userId, payloadTypeMapping));
+                _audioChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_ssrc.networkSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, userId, payloadTypeMapping, nullptr, [ssrc, setAudioLevelAndSpeech](uint8_t audioLevel, bool hasSpeech) {
+                    setAudioLevelAndSpeech(ssrc.networkSsrc, audioLevel, hasSpeech);
+                }));
             }
 
             if (_ssrc.actualSsrc != 1) {
@@ -1569,7 +1648,7 @@ public:
             _videoChannel->receive_channel()->SetSink(_mainVideoSsrc, _videoSink.get());
 
             if (e2eEncryptDecrypt) {
-                _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, userId, payloadTypeMapping));
+                _videoChannel->receive_channel()->SetDepacketizerToDecoderFrameTransformer(_mainVideoSsrc, rtc::make_ref_counted<FrameTransformer>(false, e2eEncryptDecrypt, userId, payloadTypeMapping, nullptr, nullptr));
             }
         });
 
@@ -1878,6 +1957,12 @@ struct NetworkBitrateLogRecord {
     int32_t bitrate = 0;
 };
 
+GroupLevelValue mappedAudioLevel(GroupLevelValue const &value) {
+    GroupLevelValue result = value;
+    result.level = result.level * 2.0f;
+    return result;
+}
+
 } // namespace
 
 class GroupInstanceCustomInternal : public sigslot::has_slots<>, public std::enable_shared_from_this<GroupInstanceCustomInternal> {
@@ -1937,6 +2022,12 @@ public:
         _noiseSuppressionConfiguration = std::make_shared<NoiseSuppressionConfiguration>(descriptor.initialEnableNoiseSuppression);
 
         _externalAudioRecorder.reset(new ExternalAudioRecorder(&_externalAudioSamples, &_externalAudioSamplesMutex));
+
+        _myAudioLevel = std::make_shared<MyAudioLevelHolder>();
+
+        if (_e2eEncryptDecrypt) {
+            _myAudioLevelAndSpeech = std::make_shared<AudioLevelAndSpeechHolder>();
+        }
     }
 
     ~GroupInstanceCustomInternal() {
@@ -1977,7 +2068,9 @@ public:
             "WebRTC-BweLossExperiment/Enabled/"
         );
 
-        _networkManager.reset(new ThreadLocalObject<GroupNetworkManager>(_threads->getNetworkThread(), [weak, threads = _threads] () mutable {
+        bool takeAudioLevelFromNetwork = _e2eEncryptDecrypt == nullptr;
+
+        _networkManager.reset(new ThreadLocalObject<GroupNetworkManager>(_threads->getNetworkThread(), [weak, threads = _threads, takeAudioLevelFromNetwork] () mutable {
             return std::make_shared<GroupNetworkManager>(
                 fieldTrialsBasedConfig,
                 [=](const GroupNetworkManager::State &state) {
@@ -2011,12 +2104,16 @@ public:
                     });
                 },
                 [=](uint32_t ssrc, uint8_t audioLevel, bool isSpeech) {
+                    if (!takeAudioLevelFromNetwork) {
+                        return;
+                    }
                     threads->getMediaThread()->PostTask([weak, ssrc, audioLevel, isSpeech]() {
                         if (const auto strong = weak.lock()) {
                             strong->updateSsrcAudioLevel(ssrc, audioLevel, isSpeech);
                         }
                     });
                 },
+                !takeAudioLevelFromNetwork,
                 [=](uint32_t ssrc) {
                     threads->getMediaThread()->PostTask([weak, ssrc]() {
                         if (const auto strong = weak.lock()) {
@@ -2039,14 +2136,10 @@ public:
             PlatformInterface::SharedInstance()->configurePlatformAudio(numChannels);
 
     #if USE_RNNOISE
-            audioProcessor = std::make_unique<AudioCapturePostProcessor>([weak, threads = _threads](GroupLevelValue const &level) {
-                threads->getMediaThread()->PostTask([weak, level](){
-                    auto strong = weak.lock();
-                    if (!strong) {
-                        return;
-                    }
-                    strong->_myAudioLevel = level;
-                });
+            audioProcessor = std::make_unique<AudioCapturePostProcessor>([myAudioLevel = _myAudioLevel](GroupLevelValue const &level) {
+                if (myAudioLevel) {
+                    myAudioLevel->set(level);
+                }
             }, _noiseSuppressionConfiguration, nullptr, nullptr);
     #endif
         } else {
@@ -2335,7 +2428,7 @@ public:
 
             if (_e2eEncryptDecrypt) {
                 for (auto ssrc : simulcastGroupSsrcs) {
-                    _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, int64_t(), _payloadTypeMapping));
+                    _outgoingVideoChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(ssrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, int64_t(), _payloadTypeMapping, nullptr, nullptr));
                 }
             }
         });
@@ -2545,7 +2638,14 @@ public:
             _outgoingAudioChannel->SetPayloadTypeDemuxingEnabled(false);
 
             if (_e2eEncryptDecrypt) {
-                _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, int64_t(), _payloadTypeMapping));
+                auto myAudioLevelAndSpeech = _myAudioLevelAndSpeech;
+                _outgoingAudioChannel->send_channel()->SetEncoderToPacketizerFrameTransformer(_outgoingAudioSsrc, rtc::make_ref_counted<FrameTransformer>(true, _e2eEncryptDecrypt, int64_t(), _payloadTypeMapping, [myAudioLevelAndSpeech]() -> std::pair<uint8_t, bool> {
+                    if (myAudioLevelAndSpeech) {
+                        return myAudioLevelAndSpeech->get();
+                    } else {
+                        return std::make_pair(0, false);
+                    }
+                }, nullptr));
             }
         });
 
@@ -2632,14 +2732,10 @@ public:
     }
 
     void updateSsrcAudioLevel(uint32_t ssrc, uint8_t audioLevel, bool isSpeech) {
-        float mappedLevelDb = ((float)audioLevel) / (float)(0x7f);
-
-        //mappedLevelDb = fabs(1.0f - mappedLevelDb);
-        //float mappedLevel = pow(10.0f, mappedLevelDb * 0.1f);
-
-        //printf("mappedLevelDb: %f, mappedLevel: %f\n", mappedLevelDb, mappedLevel);
-
-        float mappedLevel = (fabs(1.0f - mappedLevelDb)) * 1.0f;
+        // Convert from -dBov (0 to -127 dBov) to linear scale
+        // audioLevel of 0 means 0 dBov (maximum level)
+        // audioLevel of 127 means -127 dBov (minimum level)
+        float mappedLevel = pow(10.0f, -audioLevel / 20.0f);
 
         auto it = _audioLevels.find(ChannelId(ssrc));
         if (it != _audioLevels.end()) {
@@ -2695,7 +2791,7 @@ public:
                 }
                 levelsUpdate.updates.push_back(GroupLevelUpdate{
                     effectiveSsrc,
-                    it.second.value,
+                    mappedAudioLevel(it.second.value),
                     });
                 if (it.second.value.level > 0.001f) {
                     auto audioChannel = strong->_incomingAudioChannels.find(it.first);
@@ -2706,9 +2802,9 @@ public:
             }
             strong->_audioLevels.clear();
 
-            auto myAudioLevel = strong->_myAudioLevel;
+            auto myAudioLevel = strong->_myAudioLevel->get();
             myAudioLevel.isMuted = strong->_isMuted;
-            levelsUpdate.updates.push_back(GroupLevelUpdate{ 0, myAudioLevel });
+            levelsUpdate.updates.push_back(GroupLevelUpdate{ 0, mappedAudioLevel(myAudioLevel) });
 
             GroupActivitiesUpdate activitiesUpdate;
             activitiesUpdate.updates.reserve(strong->_ssrcActivities.size());
@@ -2732,6 +2828,21 @@ public:
                 strong->_activitiesUpdated(activitiesUpdate);
             }
 
+            if (strong->_myAudioLevelAndSpeech) {
+                uint8_t compressedAudioLevel = 0;
+
+                // Convert from linear scale to -dBov (0 to -127 dBov)
+                // audioLevel of 0 means 0 dBov (maximum level)
+                // audioLevel of 127 means -127 dBov (minimum level)
+                if (myAudioLevel.level > 0.0f) {
+                    float dBov = 20.0f * log10(myAudioLevel.level);
+                    compressedAudioLevel = static_cast<uint8_t>(std::clamp(static_cast<int>(-dBov), 0, 127));
+                } else {
+                    compressedAudioLevel = 127; // Minimum level (-127 dBov)
+                }
+
+                strong->_myAudioLevelAndSpeech->set(compressedAudioLevel, myAudioLevel.voice && !myAudioLevel.isMuted);
+            }
             bool isSpeech = myAudioLevel.voice && !myAudioLevel.isMuted;
             strong->_networkManager->perform([isSpeech = isSpeech](GroupNetworkManager *networkManager) {
                 networkManager->setOutgoingVoiceActivity(isSpeech);
@@ -3849,7 +3960,14 @@ public:
             _onAudioFrame,
             _threads,
             _e2eEncryptDecrypt,
-            _payloadTypeMapping
+            _payloadTypeMapping,
+            [weak, threads = _threads](uint32_t ssrc, uint8_t audioLevel, bool hasSpeech) {
+                threads->getMediaThread()->PostTask([weak, ssrc, audioLevel, hasSpeech]() {
+                    if (const auto strong = weak.lock()) {
+                        strong->updateSsrcAudioLevel(ssrc, audioLevel, hasSpeech);
+                    }
+                });
+            }
         ));
 
         auto volume = _volumeBySsrc.find(ssrc.actualSsrc);
@@ -4211,8 +4329,8 @@ private:
     int _pendingOutgoingVideoConstraintRequestId = 0;
 
     std::map<ChannelId, InternalGroupLevelValue> _audioLevels;
-    GroupLevelValue _myAudioLevel;
-
+    std::shared_ptr<MyAudioLevelHolder> _myAudioLevel;
+    std::shared_ptr<AudioLevelAndSpeechHolder> _myAudioLevelAndSpeech;
     std::map<ChannelId, InternalGroupActivityValue> _ssrcActivities;
 
     bool _isMuted = true;
