@@ -68,13 +68,12 @@ static void updateHeaderWithVoiceActivity(rtc::CopyOnWriteBuffer *packet, const 
         if (id == 1) { // kAudioLevelUri
             uint8_t audioLevel = ptr[0] & 0x7f;
             if (zeroAudioLevel) {
-                float mappedLevel = pow(10.0f, -audioLevel / 20.0f);
-                if (mappedLevel < 0.05f) {
-                    audioLevel = 127;
-                } else if (mappedLevel < 0.8f) {
-                    audioLevel = 20;
-                } else {
+                if (audioLevel < 47) {
                     audioLevel = 0;
+                } else if (audioLevel < 107) {
+                    audioLevel = 106;
+                } else {
+                    audioLevel = 127;
                 }
             }
             bool parsedVoiceActivity = (ptr[0] & 0x80) != 0;
