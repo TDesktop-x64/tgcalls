@@ -183,7 +183,7 @@ struct GroupInstanceDescriptor {
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> requestMediaChannelDescriptions;
     int minOutgoingVideoBitrateKbit{100};
     std::function<void(bool)> onMutedSpeechActivityDetected;
-    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> e2eEncryptDecrypt;
+    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> e2eEncryptDecrypt;
     bool isConference{false};
 };
 

@@ -1225,7 +1225,7 @@ enum class FrameTransformerPayloadType {
 
 class FrameTransformer : public webrtc::FrameTransformerInterface {
 public:
-    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> transform, int64_t userId, std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping, std::function<std::pair<uint8_t, bool>()> getAudioLevelAndSpeech, std::function<void(uint8_t, bool)> setAudioLevelAndSpeech) :
+    FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> transform, int64_t userId, std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping, std::function<std::pair<uint8_t, bool>()> getAudioLevelAndSpeech, std::function<void(uint8_t, bool)> setAudioLevelAndSpeech) :
     _isEncryptor(isEncryptor),
     _transform(transform),
     _userId(userId),
@@ -1281,39 +1281,22 @@ public:
                     plaintextHeaderSize = (uint32_t)frame->GetData().size();
                 }
 
-                if (plaintextHeaderSize >= (uint32_t)frame->GetData().size()) {
-                    rtc::CopyOnWriteBuffer buffer(frame->GetData().size() + 4);
-                    std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, buffer.MutableData());
-                    memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
+                std::vector<uint8_t> frameData;
+                frameData.resize(frame->GetData().size());
+                std::copy(frame->GetData().begin(), frame->GetData().end(), frameData.begin());
 
-                    frame->SetData(buffer);
+                auto result = _transform(frameData, _userId, _isEncryptor, plaintextHeaderSize);
+
+                if (!result.empty()) {
+                    frame->SetData(result);
                     sink->OnTransformedFrame(std::move(frame));
-                } else {
-                    std::vector<uint8_t> encryptedBuffer;
-                    encryptedBuffer.resize(frame->GetData().size() - plaintextHeaderSize);
-
-                    std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().end(), encryptedBuffer.begin());
-
-                    auto result = _transform(encryptedBuffer, _userId, _isEncryptor);
-
-                    if (!result.empty()) {
-                        rtc::CopyOnWriteBuffer buffer(plaintextHeaderSize + result.size() + 4);
-
-                        std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, buffer.MutableData());
-                        std::copy(result.data(), result.data() + result.size(), buffer.MutableData() + plaintextHeaderSize);
-                        memcpy(buffer.MutableData() + buffer.size() - 4, &plaintextHeaderSize, 4);
-
-                        frame->SetData(buffer);
-                        sink->OnTransformedFrame(std::move(frame));
-                    }
                 }
             } else {
                 std::vector<uint8_t> buffer;
-                buffer.resize(frame->GetData().size() + 4 + 1);
+                buffer.resize(frame->GetData().size() + 1 + 1);
                 std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.begin());
                 
-                uint32_t versionMagic = 0xabcd1234;
-                memcpy(buffer.data() + buffer.size() - 1 - 4, &versionMagic, 4);
+                buffer[buffer.size() - 1 - 1] = 0x01;
                 std::pair<uint8_t, bool> audioLevelAndSpeech = std::make_pair(0, false);
                 if (_getAudioLevelAndSpeech) {
                     audioLevelAndSpeech = _getAudioLevelAndSpeech();
@@ -1325,7 +1308,7 @@ public:
                 encodedAudioLevelAndSpeech |= audioLevelAndSpeech.first & 0x7f;
                 buffer[buffer.size() - 1] = encodedAudioLevelAndSpeech;
                 
-                auto result = _transform(buffer, _userId, _isEncryptor);
+                auto result = _transform(buffer, _userId, _isEncryptor, 0);
                 if (!result.empty()) {
                     frame->SetData(result);
                     sink->OnTransformedFrame(std::move(frame));
@@ -1333,36 +1316,12 @@ public:
             }
         } else {
             if (payloadType != FrameTransformerPayloadType::Opus) {
-                if (frame->GetData().size() < 4) {
-                    return;
-                }
-                uint32_t plaintextHeaderSize = 0;
-                memcpy(&plaintextHeaderSize, frame->GetData().begin() + (frame->GetData().size() - 4), 4);
-
-                if (plaintextHeaderSize > frame->GetData().size() - 4) {
-                    return;
-                }
-
-                if (frame->GetData().size() > 4 + plaintextHeaderSize) {
-                    std::vector<uint8_t> buffer;
-                    buffer.resize(frame->GetData().size() - 4 - plaintextHeaderSize);
-
-                    std::copy(frame->GetData().begin() + plaintextHeaderSize, frame->GetData().begin() + plaintextHeaderSize + (frame->GetData().size() - 4 - plaintextHeaderSize), buffer.begin());
-                    auto result = _transform(buffer, _userId, _isEncryptor);
-                    if (!result.empty()) {
-                        rtc::CopyOnWriteBuffer decryptedFrame(plaintextHeaderSize + result.size());
-
-                        std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, decryptedFrame.MutableData());
-
-                        std::copy(result.data(), result.data() + result.size(), decryptedFrame.MutableData() + plaintextHeaderSize);
-                        frame->SetData(decryptedFrame);
-                        sink->OnTransformedFrame(std::move(frame));
-                    }
-                } else {
-                    rtc::CopyOnWriteBuffer decryptedFrame(plaintextHeaderSize);
-
-                    std::copy(frame->GetData().begin(), frame->GetData().begin() + plaintextHeaderSize, decryptedFrame.MutableData());
-
+                std::vector<uint8_t> encryptedFrame;
+                encryptedFrame.resize(frame->GetData().size());
+                std::copy(frame->GetData().begin(), frame->GetData().end(), encryptedFrame.begin());
+                
+                auto decryptedFrame = _transform(encryptedFrame, _userId, false, 0);
+                if (!decryptedFrame.empty()) {
                     frame->SetData(decryptedFrame);
                     sink->OnTransformedFrame(std::move(frame));
                 }
@@ -1371,12 +1330,11 @@ public:
                 buffer.resize(frame->GetData().size());
                 std::copy(frame->GetData().begin(), frame->GetData().end(), buffer.begin());
                 
-                auto result = _transform(buffer, _userId, _isEncryptor);
+                auto result = _transform(buffer, _userId, false, 0);
                 if (!result.empty()) {
-                    if (result.size() >= 5) {
-                        uint32_t versionMagic = 0;
-                        memcpy(&versionMagic, result.data() + result.size() - 5, 4);
-                        if (versionMagic == 0xabcd1234) {
+                    if (result.size() >= 2) {
+                        uint8_t extensionFlags = result[result.size() - 2];
+                        if (extensionFlags & 0x01) {
                             uint8_t audioLevelAndSpeech = result[result.size() - 1];
                             if (_setAudioLevelAndSpeech) {
                                 bool hasSpeech = (audioLevelAndSpeech & 0x80) != 0;
@@ -1397,7 +1355,7 @@ public:
 
 private:
     bool _isEncryptor = false;
-    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> _transform;
+    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> _transform;
     int64_t _userId = 0;
     std::map<int32_t, FrameTransformerPayloadType> _payloadTypeMapping;
     std::function<std::pair<uint8_t, bool>()> _getAudioLevelAndSpeech;
@@ -1420,7 +1378,7 @@ public:
         std::function<void(AudioSinkImpl::Update)> &&onAudioLevelUpdated,
         std::function<void(uint32_t, const AudioFrame &)> onAudioFrame,
         std::shared_ptr<Threads> threads,
-        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> e2eEncryptDecrypt,
+        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> e2eEncryptDecrypt,
         std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping,
         std::function<void(uint32_t, uint8_t, bool)> setAudioLevelAndSpeech) :
     _threads(threads),
@@ -1556,7 +1514,7 @@ public:
         VideoChannelDescription::Quality maxQuality,
         GroupParticipantVideoInformation const &description,
         std::shared_ptr<Threads> threads,
-        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> e2eEncryptDecrypt,
+        std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> e2eEncryptDecrypt,
         std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping) :
     _threads(threads),
     _endpointId(description.endpointId),
@@ -4285,7 +4243,7 @@ private:
     int _minOutgoingVideoBitrateKbit{100};
     VideoContentType _videoContentType{VideoContentType::None};
     std::vector<VideoCodecName> _videoCodecPreferences;
-    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool)> _e2eEncryptDecrypt;
+    std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> _e2eEncryptDecrypt;
 
     int _nextMediaChannelDescriptionsRequestId = 0;
     std::map<int, RequestedMediaChannelDescriptions> _requestedMediaChannelDescriptions;
