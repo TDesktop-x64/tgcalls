@@ -1156,6 +1156,7 @@ uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fra
                     naluIndex.payload_size);
 
                 headerEndOffset = naluIndex.payload_start_offset + ppsIdBytes;
+                maxOffset = std::max(maxOffset, headerEndOffset);
                 break;
             }
             // For keyframe related NAL units, ensure we keep their header
@@ -1342,7 +1343,9 @@ public:
                                 _setAudioLevelAndSpeech(audioLevel, hasSpeech);
                             }
 
-                            result.resize(result.size() - 5);
+                            result.resize(result.size() - 2);
+                        } else {
+                            result.resize(result.size() - 1);
                         }
                     }
                     
