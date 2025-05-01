@@ -11,6 +11,28 @@
 #define UIView NSView
 #endif
 
+@interface CallAudioTone : NSObject
+
+@property (nonatomic, strong, readonly) NSData * _Nonnull samples;
+@property (nonatomic, readonly) NSInteger sampleRate;
+@property (nonatomic, readonly) NSInteger loopCount;
+
+- (instancetype _Nonnull)initWithSamples:(NSData * _Nonnull)samples sampleRate:(NSInteger)sampleRate loopCount:(NSInteger)loopCount;
+
+@end
+
+@interface SharedCallAudioDevice : NSObject
+
+- (instancetype _Nonnull)initWithDisableRecording:(bool)disableRecording enableSystemMute:(bool)enableSystemMute;
+
++ (void)setupAudioSession;
+
+- (void)setManualAudioSessionIsActive:(bool)isAudioSessionActive;
+
+- (void)setTone:(CallAudioTone * _Nullable)tone;
+
+@end
+
 @interface OngoingCallConnectionDescriptionWebrtc : NSObject
 
 @property (nonatomic, readonly) uint8_t reflectorId;
@@ -76,10 +98,19 @@ typedef NS_ENUM(int32_t, OngoingCallDataSavingWebrtc) {
     OngoingCallDataSavingAlways
 };
 
+@interface GroupCallDisposable : NSObject
+
+- (instancetype _Nonnull)initWithBlock:(dispatch_block_t _Nonnull)block;
+- (void)dispose;
+
+@end
+
 @protocol OngoingCallThreadLocalContextQueueWebrtc <NSObject>
 
 - (void)dispatch:(void (^ _Nonnull)())f;
 - (bool)isCurrent;
+
+- (GroupCallDisposable * _Nonnull)scheduleBlock:(void (^ _Nonnull)())f after:(double)timeout;
 
 @end
 
@@ -109,13 +140,6 @@ typedef NS_ENUM(int32_t, OngoingCallDataSavingWebrtc) {
 - (void)setIsPaused:(bool)paused;
 - (void)renderToSize:(NSSize)size animated: (bool)animated;
 #endif
-@end
-
-@interface GroupCallDisposable : NSObject
-
-- (instancetype _Nonnull)initWithBlock:(dispatch_block_t _Nonnull)block;
-- (void)dispose;
-
 @end
 
 @protocol CallVideoFrameBuffer
@@ -163,6 +187,8 @@ typedef NS_ENUM(int32_t, OngoingCallDataSavingWebrtc) {
 @property (nonatomic, readonly) int width;
 @property (nonatomic, readonly) int height;
 @property (nonatomic, readonly) OngoingCallVideoOrientationWebrtc orientation;
+@property (nonatomic, readonly) bool hasDeviceRelativeOrientation;
+@property (nonatomic, readonly) OngoingCallVideoOrientationWebrtc deviceRelativeOrientation;
 @property (nonatomic, readonly) bool mirrorHorizontally;
 @property (nonatomic, readonly) bool mirrorVertically;
 
@@ -190,6 +216,14 @@ typedef NS_ENUM(int32_t, OngoingCallDataSavingWebrtc) {
 #endif
 
 - (GroupCallDisposable * _Nonnull)addVideoOutput:(void (^_Nonnull)(CallVideoFrameData * _Nonnull))sink;
+
+@end
+
+@protocol OngoingCallDirectConnection <NSObject>
+
+- (NSData * _Nonnull)addOnIncomingPacket:(void (^_Nonnull)(NSData * _Nonnull))addOnIncomingPacket;
+- (void)removeOnIncomingPacket:(NSData * _Nonnull)token;
+- (void)sendPacket:(NSData * _Nonnull)packet;
 
 @end
 
@@ -227,6 +261,9 @@ typedef NS_ENUM(int32_t, OngoingCallDataSavingWebrtc) {
 - (void)switchAudioInput:(NSString * _Nonnull)deviceId;
 - (void)addExternalAudioData:(NSData * _Nonnull)data;
 
+- (GroupCallDisposable * _Nonnull)addVideoOutputWithIsIncoming:(bool)isIncoming sink:(void (^_Nonnull)(CallVideoFrameData * _Nonnull))sink;
+
+
 @end
 
 typedef struct {
@@ -240,12 +277,13 @@ typedef NS_ENUM(int32_t, OngoingGroupCallMediaChannelType) {
 };
 
 @interface OngoingGroupCallMediaChannelDescription : NSObject
-
 @property (nonatomic, readonly) OngoingGroupCallMediaChannelType type;
+@property (nonatomic, readonly) uint64_t peerId;
 @property (nonatomic, readonly) uint32_t audioSsrc;
 @property (nonatomic, strong, readonly) NSString * _Nullable videoDescription;
 
 - (instancetype _Nonnull)initWithType:(OngoingGroupCallMediaChannelType)type
+    peerId:(int64_t)peerId
     audioSsrc:(uint32_t)audioSsrc
     videoDescription:(NSString * _Nullable)videoDescription;
 
@@ -310,13 +348,14 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
 @interface OngoingGroupCallRequestedVideoChannel : NSObject
 
 @property (nonatomic, readonly) uint32_t audioSsrc;
+@property (nonatomic, readonly) int64_t userId;
 @property (nonatomic, strong, readonly) NSString * _Nonnull endpointId;
 @property (nonatomic, strong, readonly) NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull ssrcGroups;
 
 @property (nonatomic, readonly) OngoingGroupCallRequestedVideoQuality minQuality;
 @property (nonatomic, readonly) OngoingGroupCallRequestedVideoQuality maxQuality;
 
-- (instancetype _Nonnull)initWithAudioSsrc:(uint32_t)audioSsrc endpointId:(NSString * _Nonnull)endpointId ssrcGroups:(NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull)ssrcGroups minQuality:(OngoingGroupCallRequestedVideoQuality)minQuality maxQuality:(OngoingGroupCallRequestedVideoQuality)maxQuality;
+- (instancetype _Nonnull)initWithAudioSsrc:(uint32_t)audioSsrc  userId:(int64_t)userId endpointId:(NSString * _Nonnull)endpointId ssrcGroups:(NSArray<OngoingGroupCallSsrcGroup *> * _Nonnull)ssrcGroups minQuality:(OngoingGroupCallRequestedVideoQuality)minQuality maxQuality:(OngoingGroupCallRequestedVideoQuality)maxQuality;
 
 @end
 
@@ -339,9 +378,12 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
 
 @interface GroupCallThreadLocalContext : NSObject
 
+@property (nonatomic, copy) void (^ _Nullable signalBarsChanged)(int32_t);
+
 - (instancetype _Nonnull)initWithQueue:(id<OngoingCallThreadLocalContextQueueWebrtc> _Nonnull)queue
     networkStateUpdated:(void (^ _Nonnull)(GroupCallNetworkState))networkStateUpdated
     audioLevelsUpdated:(void (^ _Nonnull)(NSArray<NSNumber *> * _Nonnull))audioLevelsUpdated
+    activityUpdated:(void (^ _Nonnull)(NSArray<NSNumber *> * _Nonnull))activityUpdated
     inputDeviceId:(NSString * _Nonnull)inputDeviceId
     outputDeviceId:(NSString * _Nonnull)outputDeviceId
     videoCapturer:(OngoingCallThreadLocalContextVideoCapturer * _Nullable)videoCapturer
@@ -353,10 +395,19 @@ typedef NS_ENUM(int32_t, OngoingGroupCallRequestedVideoQuality) {
     videoContentType:(OngoingGroupCallVideoContentType)videoContentType
     enableNoiseSuppression:(bool)enableNoiseSuppression
     disableAudioInput:(bool)disableAudioInput
-    preferX264:(bool)preferX264
-    logPath:(NSString * _Nonnull)logPath;
+    prioritizeVP8:(bool)prioritizeVP8
+    logPath:(NSString * _Nonnull)logPath
+    statsLogPath:(NSString * _Nonnull)statsLogPath
+    audioDevice:(SharedCallAudioDevice * _Nullable)audioDevice
+    isConference:(bool)isConference
+    isActiveByDefault:(bool)isActiveByDefault
+    encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, bool, int32_t))encryptDecrypt;
 
-- (void)stop;
+- (void)stop:(void (^ _Nullable)())completion;
+
+- (void)setManualAudioSessionIsActive:(bool)isAudioSessionActive;
+
+- (void)setTone:(CallAudioTone * _Nullable)tone;
 
 - (void)setConnectionMode:(OngoingCallConnectionMode)connectionMode keepBroadcastConnectedIfWasEnabled:(bool)keepBroadcastConnectedIfWasEnabled isUnifiedBroadcast:(bool)isUnifiedBroadcast;
 

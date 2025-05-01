@@ -6,10 +6,11 @@
 
 namespace tgcalls {
 
-ReflectorRelayPortFactory::ReflectorRelayPortFactory(std::vector<RtcServer> servers, bool standaloneReflectorMode, uint32_t standaloneReflectorRoleId) :
+ReflectorRelayPortFactory::ReflectorRelayPortFactory(std::vector<RtcServer> servers, bool standaloneReflectorMode, uint32_t standaloneReflectorRoleId, rtc::SocketFactory *underlyingSocketFactory) :
 _servers(servers),
 _standaloneReflectorMode(standaloneReflectorMode),
-_standaloneReflectorRoleId(standaloneReflectorRoleId) {
+_standaloneReflectorRoleId(standaloneReflectorRoleId),
+_underlyingSocketFactory(underlyingSocketFactory) {
 }
 
 ReflectorRelayPortFactory::~ReflectorRelayPortFactory() {
@@ -30,7 +31,7 @@ std::unique_ptr<cricket::Port> ReflectorRelayPortFactory::Create(const cricket::
             return nullptr;
         }
 
-        auto port = ReflectorPort::Create(args, udp_socket, id, args.relative_priority, _standaloneReflectorMode, _standaloneReflectorRoleId);
+        auto port = ReflectorPort::Create(args, _underlyingSocketFactory, udp_socket, id, args.relative_priority, _standaloneReflectorMode, _standaloneReflectorRoleId);
         if (!port) {
             return nullptr;
         }
@@ -61,7 +62,7 @@ std::unique_ptr<cricket::Port> ReflectorRelayPortFactory::Create(const cricket::
             return nullptr;
         }
 
-        auto port = ReflectorPort::Create(args, min_port, max_port, id, args.relative_priority, _standaloneReflectorMode, _standaloneReflectorRoleId);
+        auto port = ReflectorPort::Create(args, _underlyingSocketFactory, min_port, max_port, id, args.relative_priority, _standaloneReflectorMode, _standaloneReflectorRoleId);
         if (!port) {
             return nullptr;
         }

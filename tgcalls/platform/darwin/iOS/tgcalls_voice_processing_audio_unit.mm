@@ -71,11 +71,12 @@ static OSStatus GetAGCState(AudioUnit audio_unit, UInt32* enabled) {
   return result;
 }
 
-VoiceProcessingAudioUnit::VoiceProcessingAudioUnit(bool bypass_voice_processing, bool disable_recording, int numChannels,
+VoiceProcessingAudioUnit::VoiceProcessingAudioUnit(bool bypass_voice_processing, bool disable_recording, bool enableSystemMute, int numChannels,
                                                    VoiceProcessingAudioUnitObserver* observer)
     : bypass_voice_processing_(bypass_voice_processing),
       disable_recording_(disable_recording),
       numChannels_(numChannels),
+      enableSystemMute_(enableSystemMute),
       observer_(observer),
       vpio_unit_(nullptr),
       state_(kInitRequired) {
@@ -212,6 +213,14 @@ bool VoiceProcessingAudioUnit::Init() {
           result = AudioUnitSetProperty(vpio_unit_, kAUVoiceIOProperty_MutedSpeechActivityEventListener, kAudioUnitScope_Global, kInputBus, &listener, sizeof(AUVoiceIOMutedSpeechActivityEventListener));
       }
   }
+    
+    if (enableSystemMute_) {
+        UInt32 muteUplinkOutput = isMicrophoneMuted_ ? 1 : 0;
+        OSStatus result = AudioUnitSetProperty(vpio_unit_, kAUVoiceIOProperty_MuteOutput, kAudioUnitScope_Global, kInputBus, &muteUplinkOutput, sizeof(muteUplinkOutput));
+        if (result != noErr) {
+            RTCLogError(@"Failed to set kAUVoiceIOProperty_MuteOutput. Error=%ld", (long)result);
+        }
+    }
 
   state_ = kUninitialized;
   return true;
@@ -415,11 +424,13 @@ bool VoiceProcessingAudioUnit::Uninitialize() {
 
 void VoiceProcessingAudioUnit::setIsMicrophoneMuted(bool isMuted) {
     isMicrophoneMuted_ = isMuted;
-    if (vpio_unit_ && state_ == kStarted) {
-        UInt32 muteUplinkOutput = isMuted ? 1 : 0;
-        OSStatus result = AudioUnitSetProperty(vpio_unit_, kAUVoiceIOProperty_MuteOutput, kAudioUnitScope_Global, kInputBus, &muteUplinkOutput, sizeof(muteUplinkOutput));
-        if (result != noErr) {
-            RTCLogError(@"Failed to set kAUVoiceIOProperty_MuteOutput. Error=%ld", (long)result);
+    if (enableSystemMute_) {
+        if (vpio_unit_ && state_ == kStarted) {
+            UInt32 muteUplinkOutput = isMuted ? 1 : 0;
+            OSStatus result = AudioUnitSetProperty(vpio_unit_, kAUVoiceIOProperty_MuteOutput, kAudioUnitScope_Global, kInputBus, &muteUplinkOutput, sizeof(muteUplinkOutput));
+            if (result != noErr) {
+                RTCLogError(@"Failed to set kAUVoiceIOProperty_MuteOutput. Error=%ld", (long)result);
+            }
         }
     }
 }

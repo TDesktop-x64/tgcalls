@@ -25,6 +25,7 @@ class scoped_refptr;
 
 namespace tgcalls {
 
+class WrappedAudioDeviceModule;
 class VideoCaptureInterface;
 
 struct FilePath {
@@ -130,9 +131,9 @@ struct EncryptionKey {
 	bool isOutgoing = false;
 
     EncryptionKey(
-		std::shared_ptr<std::array<uint8_t, kSize>> value,
+		std::shared_ptr<const std::array<uint8_t, kSize>> const value,
 		bool isOutgoing)
-	: value(std::move(value)), isOutgoing(isOutgoing) {
+	: value(value), isOutgoing(isOutgoing) {
     }
 };
 
@@ -236,6 +237,7 @@ struct Descriptor {
     std::function<void(float)> remotePrefferedAspectRatioUpdated;
 	std::function<void(const std::vector<uint8_t> &)> signalingDataEmitted;
 	std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> createWrappedAudioDeviceModule;
     std::string initialInputDeviceId;
     std::string initialOutputDeviceId;
     std::shared_ptr<DirectConnectionChannel> directConnectionChannel;

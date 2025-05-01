@@ -110,6 +110,7 @@ private:
     std::function<void(std::string const &)> _dataChannelMessageReceived;
 
     std::unique_ptr<rtc::NetworkMonitorFactory> _networkMonitorFactory;
+    rtc::SocketFactory *_underlyingSocketFactory = nullptr;
     std::unique_ptr<rtc::PacketSocketFactory> _socketFactory;
     std::unique_ptr<rtc::NetworkManager> _networkManager;
     std::unique_ptr<webrtc::TurnCustomizer> _turnCustomizer;

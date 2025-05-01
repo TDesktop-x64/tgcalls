@@ -68,7 +68,7 @@ void DarwinInterface::configurePlatformAudio(int numChanels) {
 
 std::unique_ptr<webrtc::VideoEncoderFactory> DarwinInterface::makeVideoEncoderFactory(bool preferHardwareEncoding, bool isScreencast) {
     auto nativeFactory = std::make_unique<webrtc::CustomObjCVideoEncoderFactory>([[TGRTCDefaultVideoEncoderFactory alloc] initWithPreferHardwareH264:preferHardwareEncoding preferX264:false]);
-    if (!preferHardwareEncoding && !isScreencast) {
+    if (!preferHardwareEncoding) {
         auto nativeHardwareFactory = std::make_unique<webrtc::CustomObjCVideoEncoderFactory>([[TGRTCDefaultVideoEncoderFactory alloc] initWithPreferHardwareH264:true preferX264:false]);
         return std::make_unique<webrtc::SimulcastVideoEncoderFactory>(std::move(nativeFactory), std::move(nativeHardwareFactory));
     }
@@ -126,10 +126,10 @@ std::unique_ptr<VideoCapturerInterface> DarwinInterface::makeVideoCapturer(webrt
 }
 
 webrtc::scoped_refptr<WrappedAudioDeviceModule> DarwinInterface::wrapAudioDeviceModule(webrtc::scoped_refptr<webrtc::AudioDeviceModule> module) {
-#ifdef WEBRTC_MAC
-    return rtc::make_ref_counted<AudioDeviceModuleMacos>(module);
-#else
+#ifdef WEBRTC_IOS
     return rtc::make_ref_counted<AudioDeviceModuleIOS>(module);
+#else
+    return rtc::make_ref_counted<AudioDeviceModuleMacos>(module);
 #endif
 }
 

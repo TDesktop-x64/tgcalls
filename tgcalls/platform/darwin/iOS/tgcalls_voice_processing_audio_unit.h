@@ -48,7 +48,7 @@ class VoiceProcessingAudioUnitObserver {
 // VoIP applications.
 class VoiceProcessingAudioUnit {
  public:
-  VoiceProcessingAudioUnit(bool bypass_voice_processing, bool disable_recording, int numChannels,
+  VoiceProcessingAudioUnit(bool bypass_voice_processing, bool disable_recording, bool enableSystemMute, int numChannels,
                            VoiceProcessingAudioUnitObserver* observer);
   ~VoiceProcessingAudioUnit();
 
@@ -137,7 +137,8 @@ class VoiceProcessingAudioUnit {
   const bool bypass_voice_processing_;
   const bool disable_recording_;
   const int numChannels_;
-  bool isMicrophoneMuted_ = false;
+  bool enableSystemMute_ = false;
+  bool isMicrophoneMuted_ = true;
   VoiceProcessingAudioUnitObserver* observer_;
   AudioUnit vpio_unit_;
   VoiceProcessingAudioUnit::State state_;

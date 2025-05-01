@@ -63,6 +63,7 @@
 #include "SignalingConnection.h"
 #include "ExternalSignalingConnection.h"
 #include "SignalingSctpConnection.h"
+#include "SignalingKcpConnection.h"
 #include "utils/gzip.h"
 
 namespace tgcalls {
@@ -90,6 +91,10 @@ SignalingProtocolVersion signalingProtocolVersion(std::string const &version) {
         return SignalingProtocolVersion::V2;
     } else if (version == "9.0.0") {
         return SignalingProtocolVersion::V2;
+    } else if (version == "12.0.0") {
+        return SignalingProtocolVersion::V3;
+    } else if (version == "13.0.0") {
+        return SignalingProtocolVersion::V3;
     } else {
         RTC_LOG(LS_ERROR) << "signalingProtocolVersion: unknown version " << version;
 
@@ -909,12 +914,12 @@ class InstanceV2ImplInternal : public std::enable_shared_from_this<InstanceV2Imp
 public:
     InstanceV2ImplInternal(Descriptor &&descriptor, std::shared_ptr<Threads> threads) :
     _webrtcEnvironment(webrtc::EnvironmentFactory().Create()),
-    _signalingProtocolVersion(signalingProtocolVersion(descriptor.version)),
     _threads(threads),
     _rtcServers(descriptor.rtcServers),
     _proxy(std::move(descriptor.proxy)),
     _directConnectionChannel(descriptor.directConnectionChannel),
     _enableP2P(descriptor.config.enableP2P),
+    _enableStunMarking(descriptor.config.enableStunMarking),
     _encryptionKey(std::move(descriptor.encryptionKey)),
     _stateUpdated(descriptor.stateUpdated),
     _signalBarsUpdated(descriptor.signalBarsUpdated),
@@ -924,6 +929,7 @@ public:
     _remotePrefferedAspectRatioUpdated(descriptor.remotePrefferedAspectRatioUpdated),
     _signalingDataEmitted(descriptor.signalingDataEmitted),
     _createAudioDeviceModule(descriptor.createAudioDeviceModule),
+    _createWrappedAudioDeviceModule(descriptor.createWrappedAudioDeviceModule),
     _devicesConfig(descriptor.mediaDevicesConfig),
     _statsLogPath(descriptor.config.statsLogPath),
     _eventLog(std::make_unique<webrtc::RtcEventLogNull>()),
@@ -944,6 +950,11 @@ public:
             if (customParametersJson.is_object()) {
                 _customParameters = customParametersJson.object_items();
             }
+        }
+        
+        _signalingProtocolVersion = signalingProtocolVersion(descriptor.version);
+        if (getCustomParameterBool(_customParameters, "network_kcp_experiment")) {
+            _signalingProtocolVersion = SignalingProtocolVersion::V3;
         }
     }
 
@@ -978,8 +989,25 @@ public:
 
         const auto weak = std::weak_ptr<InstanceV2ImplInternal>(shared_from_this());
 
-        if (_signalingProtocolVersion == SignalingProtocolVersion::V3) {
-            _signalingConnection = std::make_unique<SignalingSctpConnection>(
+        if (getCustomParameterBool(_customParameters, "network_kcp_experiment")) {
+            _signalingConnection = std::make_shared<SignalingKcpConnection>(
+                _threads,
+                [threads = _threads, weak](const std::vector<uint8_t> &data) {
+                    threads->getMediaThread()->PostTask([weak, data] {
+                        const auto strong = weak.lock();
+                        if (!strong) {
+                            return;
+                        }
+
+                        strong->onSignalingData(data);
+                    });
+                },
+                [signalingDataEmitted = _signalingDataEmitted](const std::vector<uint8_t> &data) {
+                    signalingDataEmitted(data);
+                }
+            );
+        } else if (_signalingProtocolVersion == SignalingProtocolVersion::V3 && !getCustomParameterBool(_customParameters, "network_signaling_nosctp")) {
+            _signalingConnection = std::make_shared<SignalingSctpConnection>(
                 _threads,
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
                     threads->getMediaThread()->PostTask([weak, data] {
@@ -997,7 +1025,7 @@ public:
             );
         }
         if (!_signalingConnection) {
-            _signalingConnection = std::make_unique<ExternalSignalingConnection>(
+            _signalingConnection = std::make_shared<ExternalSignalingConnection>(
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
                     threads->getMediaThread()->PostTask([weak, data] {
                         const auto strong = weak.lock();
@@ -1021,11 +1049,11 @@ public:
             proxy = *(_proxy.get());
         }
 
-        _networking.reset(new ThreadLocalObject<InstanceNetworking>(_threads->getNetworkThread(), [weak, threads = _threads, encryptionKey = _encryptionKey, isOutgoing = _encryptionKey.isOutgoing, rtcServers = _rtcServers, proxy, enableP2P = _enableP2P, customParameters = _customParameters]() {
+        _networking.reset(new ThreadLocalObject<InstanceNetworking>(_threads->getNetworkThread(), [weak, threads = _threads, encryptionKey = _encryptionKey, isOutgoing = _encryptionKey.isOutgoing, enableStunMarking = _enableStunMarking, rtcServers = _rtcServers, proxy, enableP2P = _enableP2P, customParameters = _customParameters]() {
             return std::static_pointer_cast<InstanceNetworking>(std::make_shared<NativeNetworkingImpl>(InstanceNetworking::Configuration{
                 .encryptionKey = encryptionKey,
                 .isOutgoing = isOutgoing,
-                .enableStunMarking = false,
+                .enableStunMarking = enableStunMarking,
                 .enableTCP = false,
                 .enableP2P = enableP2P,
                 .rtcServers = rtcServers,
@@ -1206,8 +1234,7 @@ public:
             auto stats = strong->_call->GetStats();
             float sendBitrateKbps = ((float)stats.send_bandwidth_bps / 1000.0f);
 
-            strong->_threads->getMediaThread()->PostTask([weak, sendBitrateKbps]() {
-                auto strong = weak.lock();
+            strong->_threads->getMediaThread()->PostTask([strong = std::move(strong), sendBitrateKbps]() mutable {
                 if (!strong) {
                     return;
                 }
@@ -1229,6 +1256,8 @@ public:
                 networkBitrateLogRecord.bitrate = (int32_t)sendBitrateKbps;
 
                 strong->_networkBitrateLogRecords.emplace_back(rtc::TimeMillis(), std::move(networkBitrateLogRecord));
+                
+                strong.reset();
             });
         });
     }
@@ -2139,7 +2168,7 @@ private:
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> createAudioDeviceModule() {
         const auto create = [&](webrtc::AudioDeviceModule::AudioLayer layer) {
 #ifdef WEBRTC_IOS
-            return rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, false, 1);
+            return rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, false, false, 1);
 #else
             return webrtc::AudioDeviceModule::Create(
                 layer,
@@ -2149,6 +2178,12 @@ private:
         const auto check = [&](const webrtc::scoped_refptr<webrtc::AudioDeviceModule> &result) {
             return (result && result->Init() == 0) ? result : nullptr;
         };
+        if (_createWrappedAudioDeviceModule) {
+            auto result = _createWrappedAudioDeviceModule(_taskQueueFactory.get());
+            if (result) {
+                return result;
+            }
+        }
         if (_createAudioDeviceModule) {
             if (const auto result = check(_createAudioDeviceModule(_taskQueueFactory.get()))) {
                 return result;
@@ -2159,12 +2194,13 @@ private:
 
 private:
     webrtc::Environment _webrtcEnvironment;
-    SignalingProtocolVersion _signalingProtocolVersion;
+    SignalingProtocolVersion _signalingProtocolVersion = SignalingProtocolVersion::V3;
     std::shared_ptr<Threads> _threads;
     std::vector<RtcServer> _rtcServers;
     std::unique_ptr<Proxy> _proxy;
     std::shared_ptr<DirectConnectionChannel> _directConnectionChannel;
     bool _enableP2P = false;
+    bool _enableStunMarking = false;
     EncryptionKey _encryptionKey;
     std::function<void(State)> _stateUpdated;
     std::function<void(int)> _signalBarsUpdated;
@@ -2174,12 +2210,13 @@ private:
     std::function<void(float)> _remotePrefferedAspectRatioUpdated;
     std::function<void(const std::vector<uint8_t> &)> _signalingDataEmitted;
     std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> _createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> _createWrappedAudioDeviceModule;
     MediaDevicesConfig _devicesConfig;
     FilePath _statsLogPath;
     
     std::map<std::string, json11::Json> _customParameters;
 
-    std::unique_ptr<SignalingConnection> _signalingConnection;
+    std::shared_ptr<SignalingConnection> _signalingConnection;
     std::unique_ptr<EncryptedConnection> _signalingEncryptedConnection;
 
     int64_t _startTimestamp = 0;
@@ -2336,6 +2373,8 @@ std::vector<std::string> InstanceV2Impl::GetVersions() {
     result.push_back("7.0.0");
     result.push_back("8.0.0");
     result.push_back("9.0.0");
+    result.push_back("12.0.0");
+    result.push_back("13.0.0");
     return result;
 }
 

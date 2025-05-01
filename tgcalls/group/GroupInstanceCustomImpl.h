@@ -21,7 +21,7 @@ public:
     explicit GroupInstanceCustomImpl(GroupInstanceDescriptor &&descriptor);
     ~GroupInstanceCustomImpl();
 
-    void stop();
+    void stop(std::function<void()> completion);
     
     void setConnectionMode(GroupConnectionMode connectionMode, bool keepBroadcastIfWasEnabled, bool isUnifiedBroadcast);
 
@@ -46,6 +46,7 @@ public:
     void setRequestedVideoChannels(std::vector<VideoChannelDescription> &&requestedVideoChannels);
 
     void getStats(std::function<void(GroupInstanceStats)> completion);
+    void internal_addCustomNetworkEvent(bool isRemoteConnected);
 
 private:
     std::shared_ptr<Threads> _threads;
