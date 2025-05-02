@@ -1189,8 +1189,6 @@ std::vector<uint8_t> calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const 
         maxOffset = std::max(maxOffset, headerEndOffset);
     }
 
-    headerSize = static_cast<uint32_t>(maxOffset);
-
     std::vector<uint8_t> frameData;
     frameData.resize(frame.size() + naluToUpdate.size());
 
@@ -1209,7 +1207,8 @@ std::vector<uint8_t> calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const 
     if (offset < frame.size()) {
         std::copy(frame.begin() + offset, frame.end(), frameData.begin() + offset + naluToUpdate.size());
     }
-
+        
+    headerSize = static_cast<uint32_t>(maxOffset + naluToUpdate.size());
     return frameData;
 }
 
