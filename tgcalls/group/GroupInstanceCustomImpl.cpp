@@ -1029,7 +1029,7 @@ static constexpr uint8_t kSps = 7;
 static constexpr uint8_t kPps = 8;
 static constexpr uint8_t kSei = 6;
 static constexpr uint8_t kStapA = 24;
-static constexpr size_t kNalLongStartCode = 4;
+static constexpr size_t kNalShortStartCode = 3;
 static constexpr size_t kNalHeaderSize = 1;
 static constexpr size_t kFuAHeaderSize = 2;
 constexpr size_t kLengthFieldSize = 2;
@@ -1090,9 +1090,10 @@ size_t calculateSliceHeaderBytesForPpsId(const uint8_t* data, size_t size) {
  * @param frame The H264 RTP payload in Annex B format
  * @return The size of the header that must remain unencrypted
  */
-uint32_t calculateH264FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
+std::vector<uint8_t> calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame, uint32_t& headerSize) {
     if (frame.empty()) {
-        return 0;
+        headerSize = 0;
+        return std::vector<uint8_t>();
     }
 
     // Find all NAL units in the frame
@@ -1101,49 +1102,46 @@ uint32_t calculateH264FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
 
     if (naluIndices.empty()) {
         // No valid NAL units found
-        return 0;
+        headerSize = 0;
+
+        std::vector<uint8_t> frameData;
+        frameData.resize(frame.size());
+        std::copy(frame.begin(), frame.end(), frameData.begin());
+        return frameData;
     }
 
     // Track the maximum offset we need to keep unencrypted
     size_t maxOffset = 0;
-    size_t rewrittenOffset = 0;
+    std::vector<size_t> naluToUpdate; 
 
     for (const auto& naluIndex : naluIndices) {
-        auto payload_start_offset = naluIndex.payload_start_offset + rewrittenOffset;
-        auto start_offset = naluIndex.start_offset + rewrittenOffset;
-
-        size_t startCodeLength = payload_start_offset - start_offset;
+        size_t startCodeLength = naluIndex.payload_start_offset - naluIndex.start_offset;
 
         // If nalu start code is less than 4 bytes we need to rewrite it because
         // otherwise receiving WebRTC will do this and decryption won't work anymore
-        if (startCodeLength < kNalLongStartCode) {
-            auto diff = kNalLongStartCode - startCodeLength;
-
-            payload_start_offset += diff;
-            rewrittenOffset += diff;
-
-            frame.insert(frame.begin() + start_offset, 0);
+        if (startCodeLength == kNalShortStartCode) {
+            naluToUpdate.push_back(naluIndex.start_offset);
         }
 
         // Start by including the start code and NAL header
-        size_t headerEndOffset = payload_start_offset + kNalHeaderSize;
+        size_t headerEndOffset = naluIndex.payload_start_offset + kNalHeaderSize;
 
         // Check if we have enough data to read the NAL unit type
         if (naluIndex.payload_size >= kNalHeaderSize) {
             // Get NAL unit type from the first byte after start code
-            uint8_t nalType = frame[payload_start_offset] & kTypeMask;
+            uint8_t nalType = frame[naluIndex.payload_start_offset] & kTypeMask;
 
             // Extend header size based on NAL unit type
             if (nalType == kFuA) {
                 // For fragmented units, we need the FU header as well
                 if (naluIndex.payload_size >= kFuAHeaderSize) {
-                    headerEndOffset = payload_start_offset + kFuAHeaderSize;
+                    headerEndOffset = naluIndex.payload_start_offset + kFuAHeaderSize;
 
                     // For the first fragment, we also need to include PPS ID
-                    bool isStartBit = (frame[payload_start_offset + 1] & 0x80) != 0;
+                    bool isStartBit = (frame[naluIndex.payload_start_offset + 1] & 0x80) != 0;
                     if (isStartBit) {
                         // Get original NAL type from the FU header
-                        uint8_t originalNalType = frame[payload_start_offset + 1] & kTypeMask;
+                        uint8_t originalNalType = frame[naluIndex.payload_start_offset + 1] & kTypeMask;
 
                         // If this is an IDR or non-IDR slice, include enough for PPS ID
                         if (originalNalType == kIdr || originalNalType == 1) {
@@ -1155,11 +1153,11 @@ uint32_t calculateH264FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
             } else if (nalType == kStapA) {
                 // For aggregation packets, we need the STAP-A header and first NAL's length field
                 if (naluIndex.payload_size >= kStapAHeaderSize) {
-                    headerEndOffset = payload_start_offset + kStapAHeaderSize;
+                    headerEndOffset = naluIndex.payload_start_offset + kStapAHeaderSize;
 
                     // Try to get the type of the first aggregated NAL
                     if (naluIndex.payload_size > kStapAHeaderSize) {
-                        uint8_t firstNalType = frame[payload_start_offset + kStapAHeaderSize] & kTypeMask;
+                        uint8_t firstNalType = frame[naluIndex.payload_start_offset + kStapAHeaderSize] & kTypeMask;
 
                         // If this is an IDR or non-IDR slice, include enough for PPS ID
                         if (firstNalType == kIdr || firstNalType == 1) {
@@ -1173,17 +1171,17 @@ uint32_t calculateH264FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
             else if (nalType == kIdr || nalType == 1) {
                 // Calculate bytes needed to include PPS ID
                 size_t ppsIdBytes = calculateSliceHeaderBytesForPpsId(
-                    frame.data() + payload_start_offset,
+                    frame.data() + naluIndex.payload_start_offset,
                     naluIndex.payload_size);
 
-                headerEndOffset = payload_start_offset + ppsIdBytes;
+                headerEndOffset = naluIndex.payload_start_offset + ppsIdBytes;
                 maxOffset = std::max(maxOffset, headerEndOffset);
                 break;
             }
             // For keyframe related NAL units, ensure we keep their header
             else if (nalType == kSps || nalType == kPps || nalType == kSei) {
                 // SPS and PPS need to be kept entirely in plaintext
-                headerEndOffset = payload_start_offset + naluIndex.payload_size;
+                headerEndOffset = naluIndex.payload_start_offset + naluIndex.payload_size;
             }
         }
 
@@ -1191,7 +1189,28 @@ uint32_t calculateH264FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
         maxOffset = std::max(maxOffset, headerEndOffset);
     }
 
-    return static_cast<uint32_t>(maxOffset);
+    headerSize = static_cast<uint32_t>(maxOffset);
+
+    std::vector<uint8_t> frameData;
+    frameData.resize(frame.size() + naluToUpdate.size());
+
+    size_t offset = 0;
+
+    for (size_t i = 0; i < naluToUpdate.size(); ++i) {
+        const auto& naluIndex = naluToUpdate[i];
+        if (naluIndex - offset > 0) {
+            std::copy(frame.begin() + offset, frame.begin() + naluIndex, frameData.begin() + offset + i);
+        }
+
+        frameData[naluIndex + i] = 0;
+        offset = naluIndex;
+    }
+
+    if (offset < frame.size()) {
+        std::copy(frame.begin() + offset, frame.end(), frameData.begin() + offset + naluToUpdate.size());
+    }
+
+    return frameData;
 }
 
 // VP8 Payload Header constants
@@ -1216,10 +1235,11 @@ constexpr uint8_t P_BIT = 0x01;  // Inverse key frame flag (0=key frame, 1=delta
  * @param frame The VP8 payload data (after RTP header and VP8 payload descriptor)
  * @return The size of the header that must remain unencrypted
  */
-uint32_t calculateVp8FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
+std::vector<uint8_t> calculateVp8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame, uint32_t& headerSize) {
     // Ensure we have at least 1 byte
     if (frame.empty()) {
-        return 0;
+        headerSize = 0;
+        return std::vector<uint8_t>();
     }
     
     // First byte of VP8 payload header
@@ -1231,11 +1251,16 @@ uint32_t calculateVp8FramePlaintextHeaderSize(std::vector<uint8_t>& frame) {
     if (is_key_frame) {
         // For key frames, leave 10 bytes unencrypted to cover the full uncompressed VP8 header
         // This includes the frame dimensions
-        return frame.size() >= 10 ? 10 : ((uint32_t)frame.size());
+        headerSize = frame.size() >= 10 ? 10 : ((uint32_t)frame.size());
     } else {
         // For delta frames, just leave 1 byte unencrypted (payload header)
-        return 1;
+        headerSize = 1;
     }
+
+    std::vector<uint8_t> frameData;
+    frameData.resize(frame.size());
+    std::copy(frame.begin(), frame.end(), frameData.begin());
+    return frameData;
 }
 
 enum class FrameTransformerPayloadType {
@@ -1292,15 +1317,12 @@ public:
 
         if (_isEncryptor) {
             if (payloadType == FrameTransformerPayloadType::H264 || payloadType == FrameTransformerPayloadType::VP8) {
+                uint32_t plaintextHeaderSize = 0;
                 std::vector<uint8_t> frameData;
-                frameData.resize(frame->GetData().size());
-                std::copy(frame->GetData().begin(), frame->GetData().end(), frameData.begin());
-
-                uint32_t plaintextHeaderSize =  0;
                 if (payloadType == FrameTransformerPayloadType::H264) {
-                    plaintextHeaderSize = calculateH264FramePlaintextHeaderSize(frameData);
+                    frameData = calculateH264FramePlaintextHeaderSize(frame->GetData(), plaintextHeaderSize);
                 } else if (payloadType == FrameTransformerPayloadType::VP8) {
-                    plaintextHeaderSize = calculateVp8FramePlaintextHeaderSize(frameData);
+                    frameData = calculateVp8FramePlaintextHeaderSize(frame->GetData(), plaintextHeaderSize);
                 }
 
                 if (plaintextHeaderSize > (uint32_t)frameData.size()) {
