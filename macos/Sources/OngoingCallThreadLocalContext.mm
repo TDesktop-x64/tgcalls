@@ -1670,6 +1670,7 @@ encryptDecrypt:(NSData * _Nullable (^ _Nullable)(NSData * _Nonnull, int64_t, boo
                             }
                         }
                         mappedChannel.audioSsrc = channel.audioSsrc;
+                        mappedChannel.userId = channel.peerId;
                         mappedChannel.videoInformation = channel.videoDescription.UTF8String ?: "";
                         mappedChannels.push_back(std::move(mappedChannel));
                     }
