@@ -1241,6 +1241,111 @@ enum class FrameTransformerPayloadType {
     VP8
 };
 
+const uint8_t kH26XNaluLongStartCode[] = {0, 0, 0, 1};
+constexpr uint8_t kH26XNaluShortStartSequenceSize = 3;
+
+using IndexStartCodeSizePair = std::pair<size_t, size_t>;
+
+std::optional<IndexStartCodeSizePair> FindNextH26XNaluIndex(const uint8_t* buffer,
+                                                            const size_t bufferSize,
+                                                            const size_t searchStartIndex = 0)
+{
+    constexpr uint8_t kH26XStartCodeHighestPossibleValue = 1;
+    constexpr uint8_t kH26XStartCodeEndByteValue = 1;
+    constexpr uint8_t kH26XStartCodeLeadingBytesValue = 0;
+
+    if (bufferSize < kH26XNaluShortStartSequenceSize) {
+        return std::nullopt;
+    }
+
+    // look for NAL unit 3 or 4 byte start code
+    for (size_t i = searchStartIndex; i < bufferSize - kH26XNaluShortStartSequenceSize;) {
+        if (buffer[i + 2] > kH26XStartCodeHighestPossibleValue) {
+            // third byte is not 0 or 1, can't be a start code
+            i += kH26XNaluShortStartSequenceSize;
+        }
+        else if (buffer[i + 2] == kH26XStartCodeEndByteValue) {
+            // third byte matches the start code end byte, might be a start code sequence
+            if (buffer[i + 1] == kH26XStartCodeLeadingBytesValue &&
+                buffer[i] == kH26XStartCodeLeadingBytesValue) {
+                // confirmed start sequence {0, 0, 1}
+                auto nalUnitStartIndex = i + kH26XNaluShortStartSequenceSize;
+
+                if (i >= 1 && buffer[i - 1] == kH26XStartCodeLeadingBytesValue) {
+                    // 4 byte start code
+                    return std::optional<IndexStartCodeSizePair>({nalUnitStartIndex, 4});
+                }
+                else {
+                    // 3 byte start code
+                    return std::optional<IndexStartCodeSizePair>({nalUnitStartIndex, 3});
+                }
+            }
+
+            i += kH26XNaluShortStartSequenceSize;
+        }
+        else {
+            // third byte is 0, might be a four byte start code
+            ++i;
+        }
+    }
+
+    return std::nullopt;
+}
+
+struct UnencryptedRange {
+    size_t offset = 0;
+    size_t size = 0;
+    
+    UnencryptedRange(size_t offset_, size_t size_) :
+    offset(offset_), size(size_) {
+    }
+};
+
+bool ValidateEncryptedFrame(FrameTransformerPayloadType payloadType, rtc::ArrayView<uint8_t> frame, int plaintextPrefix) {
+    if (payloadType != FrameTransformerPayloadType::H264) {
+        return true;
+    }
+
+    static_assert(kH26XNaluShortStartSequenceSize - 1 >= 0, "Padding will overflow!");
+    constexpr size_t Padding = kH26XNaluShortStartSequenceSize - 1;
+
+    std::vector<UnencryptedRange> unencryptedRanges;
+    if (plaintextPrefix != 0) {
+        unencryptedRanges.emplace_back(0, plaintextPrefix);
+    }
+
+    // H264 and H265 ciphertexts cannot contain a 3 or 4 byte start code {0, 0, 1}
+    // otherwise the packetizer gets confused
+    // and the frame we get on the decryption side will be shifted and fail to decrypt
+    size_t encryptedSectionStart = 0;
+    for (auto& range : unencryptedRanges) {
+        if (encryptedSectionStart == range.offset) {
+            encryptedSectionStart += range.size;
+            continue;
+        }
+
+        auto start = encryptedSectionStart - std::min(encryptedSectionStart, size_t{Padding});
+        auto end = std::min(range.offset + Padding, frame.size());
+        if (FindNextH26XNaluIndex(frame.data() + start, end - start)) {
+            return false;
+        }
+
+        encryptedSectionStart = range.offset + range.size;
+    }
+
+    if (encryptedSectionStart == frame.size()) {
+        return true;
+    }
+
+    auto start = encryptedSectionStart - std::min(encryptedSectionStart, size_t{Padding});
+    auto end = frame.size();
+    if (FindNextH26XNaluIndex(frame.data() + start, end - start)) {
+        return false;
+    }
+
+    return true;
+}
+
 class FrameTransformer : public webrtc::FrameTransformerInterface {
 public:
     FrameTransformer(bool isEncryptor, std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> transform, int64_t userId, std::map<int32_t, FrameTransformerPayloadType> const &payloadTypeMapping, std::function<std::pair<uint8_t, bool>()> getAudioLevelAndSpeech, std::function<void(uint8_t, bool)> setAudioLevelAndSpeech) :
@@ -1303,11 +1408,18 @@ public:
                 frameData.resize(frame->GetData().size());
                 std::copy(frame->GetData().begin(), frame->GetData().end(), frameData.begin());
 
-                auto result = _transform(frameData, _userId, _isEncryptor, plaintextHeaderSize);
-
-                if (!result.empty()) {
-                    frame->SetData(result);
-                    sink->OnTransformedFrame(std::move(frame));
+                for (int attempt = 0; attempt < 4; attempt++) {
+                    auto result = _transform(frameData, _userId, _isEncryptor, plaintextHeaderSize);
+                    
+                    if (!result.empty()) {
+                        if (ValidateEncryptedFrame(payloadType, result, plaintextHeaderSize)) {
+                            frame->SetData(result);
+                            sink->OnTransformedFrame(std::move(frame));
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
                 }
             } else {
                 std::vector<uint8_t> buffer;
