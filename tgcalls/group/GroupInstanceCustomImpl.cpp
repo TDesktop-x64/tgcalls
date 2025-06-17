@@ -736,20 +736,31 @@ public:
 
 private:
     virtual void Initialize(int sample_rate_hz, int num_channels) override {
+        _currentSampleRate = sample_rate_hz;
     }
 
-    virtual void Process(webrtc::AudioBuffer *buffer) override {
-        if (!buffer) {
+    virtual void Process(webrtc::AudioBuffer *originalBuffer) override {
+        if (!originalBuffer) {
             return;
         }
-        if (buffer->num_channels() != 1) {
+        if (originalBuffer->num_channels() != 1) {
             return;
         }
         if (!_denoiseState) {
             return;
         }
+        
+        webrtc::AudioBuffer *buffer = originalBuffer;
+        bool freeBuffer = false;
+        
         if (buffer->num_frames() != _frameSamples.size()) {
-            return;
+            //TODO:optimize by running processing in another thread
+            freeBuffer = true;
+            size_t sourceSampleRate = _currentSampleRate;
+            webrtc::AudioBuffer *newBuffer = new webrtc::AudioBuffer(sourceSampleRate, 1, 48000, 1, 48000, 1);
+            webrtc::StreamConfig config((int)sourceSampleRate, 1);
+            newBuffer->CopyFrom(buffer->channels(), config);
+            buffer = newBuffer;
         }
 
         float sourcePeak = 0.0f;
@@ -758,7 +769,7 @@ private:
             sourcePeak = std::max(std::fabs(sourceSamples[i]), sourcePeak);
         }
 
-        if (_noiseSuppressionConfiguration->isEnabled) {
+        if (_noiseSuppressionConfiguration) {
             float vadProbability = 0.0f;
             if (sourcePeak >= 0.01f) {
                 vadProbability = rnnoise_process_frame(_denoiseState, _frameSamples.data(), buffer->channels()[0]);
@@ -847,6 +858,10 @@ private:
             }
             _externalAudioSamplesMutex->Unlock();
         }
+        
+        if (freeBuffer) {
+            delete buffer;
+        }
     }
 
     virtual std::string ToString() const override {
@@ -860,6 +875,8 @@ private:
     std::function<void(GroupLevelValue const &)> _updated;
     std::shared_ptr<NoiseSuppressionConfiguration> _noiseSuppressionConfiguration;
 
+    int _currentSampleRate = 0;
+    
     DenoiseState *_denoiseState = nullptr;
     std::vector<float> _frameSamples;
     int32_t _peakCount = 0;
