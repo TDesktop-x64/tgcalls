@@ -1241,7 +1241,6 @@ enum class FrameTransformerPayloadType {
     VP8
 };
 
-const uint8_t kH26XNaluLongStartCode[] = {0, 0, 0, 1};
 constexpr uint8_t kH26XNaluShortStartSequenceSize = 3;
 
 using IndexStartCodeSizePair = std::pair<size_t, size_t>;

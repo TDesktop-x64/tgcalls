@@ -63,7 +63,6 @@
 #include "SignalingConnection.h"
 #include "ExternalSignalingConnection.h"
 #include "SignalingSctpConnection.h"
-#include "SignalingKcpConnection.h"
 #include "utils/gzip.h"
 
 namespace tgcalls {
@@ -989,24 +988,7 @@ public:
 
         const auto weak = std::weak_ptr<InstanceV2ImplInternal>(shared_from_this());
 
-        if (getCustomParameterBool(_customParameters, "network_kcp_experiment")) {
-            _signalingConnection = std::make_shared<SignalingKcpConnection>(
-                _threads,
-                [threads = _threads, weak](const std::vector<uint8_t> &data) {
-                    threads->getMediaThread()->PostTask([weak, data] {
-                        const auto strong = weak.lock();
-                        if (!strong) {
-                            return;
-                        }
-
-                        strong->onSignalingData(data);
-                    });
-                },
-                [signalingDataEmitted = _signalingDataEmitted](const std::vector<uint8_t> &data) {
-                    signalingDataEmitted(data);
-                }
-            );
-        } else if (_signalingProtocolVersion == SignalingProtocolVersion::V3 && !getCustomParameterBool(_customParameters, "network_signaling_nosctp")) {
+        if (_signalingProtocolVersion == SignalingProtocolVersion::V3 && !getCustomParameterBool(_customParameters, "network_signaling_nosctp")) {
             _signalingConnection = std::make_shared<SignalingSctpConnection>(
                 _threads,
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
