@@ -736,20 +736,31 @@ public:
 
 private:
     virtual void Initialize(int sample_rate_hz, int num_channels) override {
+        _currentSampleRate = sample_rate_hz;
     }
 
-    virtual void Process(webrtc::AudioBuffer *buffer) override {
-        if (!buffer) {
+    virtual void Process(webrtc::AudioBuffer *originalBuffer) override {
+        if (!originalBuffer) {
             return;
         }
-        if (buffer->num_channels() != 1) {
+        if (originalBuffer->num_channels() != 1) {
             return;
         }
         if (!_denoiseState) {
             return;
         }
+        
+        webrtc::AudioBuffer *buffer = originalBuffer;
+        bool freeBuffer = false;
+        
         if (buffer->num_frames() != _frameSamples.size()) {
-            return;
+            //TODO:optimize by running processing in another thread
+            freeBuffer = true;
+            size_t sourceSampleRate = _currentSampleRate;
+            webrtc::AudioBuffer *newBuffer = new webrtc::AudioBuffer(sourceSampleRate, 1, 48000, 1, 48000, 1);
+            webrtc::StreamConfig config((int)sourceSampleRate, 1);
+            newBuffer->CopyFrom(buffer->channels(), config);
+            buffer = newBuffer;
         }
 
         float sourcePeak = 0.0f;
@@ -758,7 +769,7 @@ private:
             sourcePeak = std::max(std::fabs(sourceSamples[i]), sourcePeak);
         }
 
-        if (_noiseSuppressionConfiguration->isEnabled) {
+        if (_noiseSuppressionConfiguration) {
             float vadProbability = 0.0f;
             if (sourcePeak >= 0.01f) {
                 vadProbability = rnnoise_process_frame(_denoiseState, _frameSamples.data(), buffer->channels()[0]);
@@ -847,6 +858,10 @@ private:
             }
             _externalAudioSamplesMutex->Unlock();
         }
+        
+        if (freeBuffer) {
+            delete buffer;
+        }
     }
 
     virtual std::string ToString() const override {
@@ -860,6 +875,8 @@ private:
     std::function<void(GroupLevelValue const &)> _updated;
     std::shared_ptr<NoiseSuppressionConfiguration> _noiseSuppressionConfiguration;
 
+    int _currentSampleRate = 0;
+    
     DenoiseState *_denoiseState = nullptr;
     std::vector<float> _frameSamples;
     int32_t _peakCount = 0;
@@ -1029,6 +1046,7 @@ static constexpr uint8_t kSps = 7;
 static constexpr uint8_t kPps = 8;
 static constexpr uint8_t kSei = 6;
 static constexpr uint8_t kStapA = 24;
+static constexpr size_t kNalShortStartCode = 3;
 static constexpr size_t kNalHeaderSize = 1;
 static constexpr size_t kFuAHeaderSize = 2;
 constexpr size_t kLengthFieldSize = 2;
@@ -1082,13 +1100,17 @@ size_t calculateSliceHeaderBytesForPpsId(const uint8_t* data, size_t size) {
  *
  * This function works with WebRTC's Annex B format H.264 frames and ensures
  * the PPS ID is included in the unencrypted portion.
+ * 
+ * The method also ensures that all NAL units start codes are four bytes in length,
+ * as WebRTC will always do this on the receiver side.
  *
  * @param frame The H264 RTP payload in Annex B format
  * @return The size of the header that must remain unencrypted
  */
-uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
+std::vector<uint8_t> calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame, uint32_t& headerSize) {
     if (frame.empty()) {
-        return 0;
+        headerSize = 0;
+        return std::vector<uint8_t>();
     }
 
     // Find all NAL units in the frame
@@ -1097,13 +1119,27 @@ uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fra
 
     if (naluIndices.empty()) {
         // No valid NAL units found
-        return 0;
+        headerSize = 0;
+
+        std::vector<uint8_t> frameData;
+        frameData.resize(frame.size());
+        std::copy(frame.begin(), frame.end(), frameData.begin());
+        return frameData;
     }
 
     // Track the maximum offset we need to keep unencrypted
     size_t maxOffset = 0;
+    std::vector<size_t> naluToUpdate; 
 
     for (const auto& naluIndex : naluIndices) {
+        size_t startCodeLength = naluIndex.payload_start_offset - naluIndex.start_offset;
+
+        // If nalu start code is less than 4 bytes we need to rewrite it because
+        // otherwise receiving WebRTC will do this and decryption won't work anymore
+        if (startCodeLength == kNalShortStartCode) {
+            naluToUpdate.push_back(naluIndex.start_offset);
+        }
+
         // Start by including the start code and NAL header
         size_t headerEndOffset = naluIndex.payload_start_offset + kNalHeaderSize;
 
@@ -1170,7 +1206,27 @@ uint32_t calculateH264FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fra
         maxOffset = std::max(maxOffset, headerEndOffset);
     }
 
-    return static_cast<uint32_t>(maxOffset);
+    std::vector<uint8_t> frameData;
+    frameData.resize(frame.size() + naluToUpdate.size());
+
+    size_t offset = 0;
+
+    for (size_t i = 0; i < naluToUpdate.size(); ++i) {
+        const auto& naluIndex = naluToUpdate[i];
+        if (naluIndex - offset > 0) {
+            std::copy(frame.begin() + offset, frame.begin() + naluIndex, frameData.begin() + offset + i);
+        }
+
+        frameData[naluIndex + i] = 0;
+        offset = naluIndex;
+    }
+
+    if (offset < frame.size()) {
+        std::copy(frame.begin() + offset, frame.end(), frameData.begin() + offset + naluToUpdate.size());
+    }
+        
+    headerSize = static_cast<uint32_t>(maxOffset + naluToUpdate.size());
+    return frameData;
 }
 
 // VP8 Payload Header constants
@@ -1195,10 +1251,11 @@ constexpr uint8_t P_BIT = 0x01;  // Inverse key frame flag (0=key frame, 1=delta
  * @param frame The VP8 payload data (after RTP header and VP8 payload descriptor)
  * @return The size of the header that must remain unencrypted
  */
-uint32_t calculateVp8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame) {
+std::vector<uint8_t> calculateVp8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> frame, uint32_t& headerSize) {
     // Ensure we have at least 1 byte
     if (frame.empty()) {
-        return 0;
+        headerSize = 0;
+        return std::vector<uint8_t>();
     }
     
     // First byte of VP8 payload header
@@ -1210,11 +1267,16 @@ uint32_t calculateVp8FramePlaintextHeaderSize(rtc::ArrayView<const uint8_t> fram
     if (is_key_frame) {
         // For key frames, leave 10 bytes unencrypted to cover the full uncompressed VP8 header
         // This includes the frame dimensions
-        return frame.size() >= 10 ? 10 : ((uint32_t)frame.size());
+        headerSize = frame.size() >= 10 ? 10 : ((uint32_t)frame.size());
     } else {
         // For delta frames, just leave 1 byte unencrypted (payload header)
-        return 1;
+        headerSize = 1;
     }
+
+    std::vector<uint8_t> frameData;
+    frameData.resize(frame.size());
+    std::copy(frame.begin(), frame.end(), frameData.begin());
+    return frameData;
 }
 
 enum class FrameTransformerPayloadType {
@@ -1223,6 +1285,111 @@ enum class FrameTransformerPayloadType {
     H264,
     VP8
 };
+
+const uint8_t kH26XNaluLongStartCode[] = {0, 0, 0, 1};
+constexpr uint8_t kH26XNaluShortStartSequenceSize = 3;
+
+using IndexStartCodeSizePair = std::pair<size_t, size_t>;
+
+std::optional<IndexStartCodeSizePair> FindNextH26XNaluIndex(const uint8_t* buffer,
+                                                            const size_t bufferSize,
+                                                            const size_t searchStartIndex = 0)
+{
+    constexpr uint8_t kH26XStartCodeHighestPossibleValue = 1;
+    constexpr uint8_t kH26XStartCodeEndByteValue = 1;
+    constexpr uint8_t kH26XStartCodeLeadingBytesValue = 0;
+
+    if (bufferSize < kH26XNaluShortStartSequenceSize) {
+        return std::nullopt;
+    }
+
+    // look for NAL unit 3 or 4 byte start code
+    for (size_t i = searchStartIndex; i < bufferSize - kH26XNaluShortStartSequenceSize;) {
+        if (buffer[i + 2] > kH26XStartCodeHighestPossibleValue) {
+            // third byte is not 0 or 1, can't be a start code
+            i += kH26XNaluShortStartSequenceSize;
+        }
+        else if (buffer[i + 2] == kH26XStartCodeEndByteValue) {
+            // third byte matches the start code end byte, might be a start code sequence
+            if (buffer[i + 1] == kH26XStartCodeLeadingBytesValue &&
+                buffer[i] == kH26XStartCodeLeadingBytesValue) {
+                // confirmed start sequence {0, 0, 1}
+                auto nalUnitStartIndex = i + kH26XNaluShortStartSequenceSize;
+
+                if (i >= 1 && buffer[i - 1] == kH26XStartCodeLeadingBytesValue) {
+                    // 4 byte start code
+                    return std::optional<IndexStartCodeSizePair>({nalUnitStartIndex, 4});
+                }
+                else {
+                    // 3 byte start code
+                    return std::optional<IndexStartCodeSizePair>({nalUnitStartIndex, 3});
+                }
+            }
+
+            i += kH26XNaluShortStartSequenceSize;
+        }
+        else {
+            // third byte is 0, might be a four byte start code
+            ++i;
+        }
+    }
+
+    return std::nullopt;
+}
+
+struct UnencryptedRange {
+    size_t offset = 0;
+    size_t size = 0;
+    
+    UnencryptedRange(size_t offset_, size_t size_) :
+    offset(offset_), size(size_) {
+    }
+};
+
+bool ValidateEncryptedFrame(FrameTransformerPayloadType payloadType, rtc::ArrayView<uint8_t> frame, int plaintextPrefix) {
+    if (payloadType != FrameTransformerPayloadType::H264) {
+        return true;
+    }
+
+    static_assert(kH26XNaluShortStartSequenceSize - 1 >= 0, "Padding will overflow!");
+    constexpr size_t Padding = kH26XNaluShortStartSequenceSize - 1;
+
+    std::vector<UnencryptedRange> unencryptedRanges;
+    if (plaintextPrefix != 0) {
+        unencryptedRanges.emplace_back(0, plaintextPrefix);
+    }
+
+    // H264 and H265 ciphertexts cannot contain a 3 or 4 byte start code {0, 0, 1}
+    // otherwise the packetizer gets confused
+    // and the frame we get on the decryption side will be shifted and fail to decrypt
+    size_t encryptedSectionStart = 0;
+    for (auto& range : unencryptedRanges) {
+        if (encryptedSectionStart == range.offset) {
+            encryptedSectionStart += range.size;
+            continue;
+        }
+
+        auto start = encryptedSectionStart - std::min(encryptedSectionStart, size_t{Padding});
+        auto end = std::min(range.offset + Padding, frame.size());
+        if (FindNextH26XNaluIndex(frame.data() + start, end - start)) {
+            return false;
+        }
+
+        encryptedSectionStart = range.offset + range.size;
+    }
+
+    if (encryptedSectionStart == frame.size()) {
+        return true;
+    }
+
+    auto start = encryptedSectionStart - std::min(encryptedSectionStart, size_t{Padding});
+    auto end = frame.size();
+    if (FindNextH26XNaluIndex(frame.data() + start, end - start)) {
+        return false;
+    }
+
+    return true;
+}
 
 class FrameTransformer : public webrtc::FrameTransformerInterface {
 public:
@@ -1271,26 +1438,30 @@ public:
 
         if (_isEncryptor) {
             if (payloadType == FrameTransformerPayloadType::H264 || payloadType == FrameTransformerPayloadType::VP8) {
-                uint32_t plaintextHeaderSize =  0;
-                if (payloadType == FrameTransformerPayloadType::H264) {
-                    plaintextHeaderSize = calculateH264FramePlaintextHeaderSize(frame->GetData());
-                } else if (payloadType == FrameTransformerPayloadType::VP8) {
-                    plaintextHeaderSize = calculateVp8FramePlaintextHeaderSize(frame->GetData());
-                }
-
-                if (plaintextHeaderSize > (uint32_t)frame->GetData().size()) {
-                    plaintextHeaderSize = (uint32_t)frame->GetData().size();
-                }
-
+                uint32_t plaintextHeaderSize = 0;
                 std::vector<uint8_t> frameData;
-                frameData.resize(frame->GetData().size());
-                std::copy(frame->GetData().begin(), frame->GetData().end(), frameData.begin());
+                if (payloadType == FrameTransformerPayloadType::H264) {
+                    frameData = calculateH264FramePlaintextHeaderSize(frame->GetData(), plaintextHeaderSize);
+                } else if (payloadType == FrameTransformerPayloadType::VP8) {
+                    frameData = calculateVp8FramePlaintextHeaderSize(frame->GetData(), plaintextHeaderSize);
+                }
 
-                auto result = _transform(frameData, _userId, _isEncryptor, plaintextHeaderSize);
+                if (plaintextHeaderSize > (uint32_t)frameData.size()) {
+                    plaintextHeaderSize = (uint32_t)frameData.size();
+                }
 
-                if (!result.empty()) {
-                    frame->SetData(result);
-                    sink->OnTransformedFrame(std::move(frame));
+                for (int attempt = 0; attempt < 4; attempt++) {
+                    auto result = _transform(frameData, _userId, _isEncryptor, plaintextHeaderSize);
+                    
+                    if (!result.empty()) {
+                        if (ValidateEncryptedFrame(payloadType, result, plaintextHeaderSize)) {
+                            frame->SetData(result);
+                            sink->OnTransformedFrame(std::move(frame));
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
                 }
             } else {
                 std::vector<uint8_t> buffer;
@@ -3106,7 +3277,7 @@ public:
         settings.start_bitrate_bps = preferences.start_bitrate_bps;
         settings.max_bitrate_bps = preferences.max_bitrate_bps;
 
-	_threads->getWorkerThread()->BlockingCall([&]() {
+        _threads->getWorkerThread()->BlockingCall([&]() {
             _call->GetTransportControllerSend()->SetSdpBitrateParameters(preferences);
             _call->SetClientBitratePreferences(settings);
         });
