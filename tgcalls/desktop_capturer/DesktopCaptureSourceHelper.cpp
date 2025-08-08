@@ -224,7 +224,7 @@ void SourceFrameCallbackImpl::OnCaptureResult(
 		webrtc::kVideoRotation_0,
         webrtc::Clock::GetRealTimeClock()->CurrentTime().us());
 	if (const auto sink = _sink.get()) {
-		_sink->OnFrame(nativeVideoFrame);
+		sink->OnFrame(nativeVideoFrame);
 	}
 	if (const auto sink = _secondarySink.get()) {
 		sink->OnFrame(nativeVideoFrame);

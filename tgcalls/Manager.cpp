@@ -263,11 +263,11 @@ void Manager::receiveSignalingData(const std::vector<uint8_t> &data) {
 
 void Manager::receiveMessage(DecryptedMessage &&message) {
 	const auto data = &message.message.data;
-	if (const auto candidatesList = absl::get_if<CandidatesListMessage>(data)) {
+	if (absl::get_if<CandidatesListMessage>(data)) {
 		_networkManager->perform([message = std::move(message)](NetworkManager *networkManager) mutable {
 			networkManager->receiveSignalingMessage(std::move(message));
 		});
-	} else if (const auto videoFormats = absl::get_if<VideoFormatsMessage>(data)) {
+	} else if (absl::get_if<VideoFormatsMessage>(data)) {
 		_mediaManager->perform([message = std::move(message)](MediaManager *mediaManager) mutable {
 			mediaManager->receiveMessage(std::move(message));
 		});
