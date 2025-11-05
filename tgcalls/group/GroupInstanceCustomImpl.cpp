@@ -3229,6 +3229,7 @@ public:
         GroupNetworkState effectiveNetworkState;
         effectiveNetworkState.isConnected = isEffectivelyConnected;
         effectiveNetworkState.isTransitioningFromBroadcastToRtc = isTransitioningFromBroadcastToRtc;
+        effectiveNetworkState.connectionMode = _connectionMode;
 
         if (_effectiveNetworkState.isConnected != effectiveNetworkState.isConnected || _effectiveNetworkState.isTransitioningFromBroadcastToRtc != effectiveNetworkState.isTransitioningFromBroadcastToRtc) {
             _effectiveNetworkState = effectiveNetworkState;
@@ -3554,6 +3555,17 @@ public:
             _connectionMode = connectionMode;
             _isUnifiedBroadcast = isUnifiedBroadcast;
             onConnectionModeUpdated(previousMode, keepBroadcastIfWasEnabled);
+            
+            GroupNetworkState effectiveNetworkState = _effectiveNetworkState;
+            effectiveNetworkState.connectionMode = _connectionMode;
+
+            if (_effectiveNetworkState.connectionMode != effectiveNetworkState.connectionMode) {
+                _effectiveNetworkState = effectiveNetworkState;
+
+                if (_networkStateUpdated) {
+                    _networkStateUpdated(_effectiveNetworkState);
+                }
+            }
         }
     }
 
