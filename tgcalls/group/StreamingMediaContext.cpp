@@ -883,11 +883,11 @@ public:
                     };
 
                     const auto typeData = &part->typeData;
-                    if (const auto audioData = absl::get_if<PendingAudioSegmentData>(typeData)) {
+                    if (absl::get_if<PendingAudioSegmentData>(typeData)) {
                         part->task = _requestAudioBroadcastPart(segmentTimestamp, _segmentDuration, handleResult);
                     } else if (const auto videoData = absl::get_if<PendingVideoSegmentData>(typeData)) {
                         part->task = _requestVideoBroadcastPart(segmentTimestamp, _segmentDuration, videoData->channelId, videoData->quality, handleResult);
-                    } else if (const auto unifiedData = absl::get_if<PendingUnifiedSegmentData>(typeData)) {
+                    } else if (absl::get_if<PendingUnifiedSegmentData>(typeData)) {
                         part->task = _requestVideoBroadcastPart(segmentTimestamp, _segmentDuration, 1, VideoChannelDescription::Quality::Full, handleResult);
                     }
                 }
@@ -899,7 +899,7 @@ public:
                 segment->duration = _segmentDuration;
                 for (auto &part : pendingSegment->parts) {
                     const auto typeData = &part->typeData;
-                    if (const auto audioData = absl::get_if<PendingAudioSegmentData>(typeData)) {
+                    if (absl::get_if<PendingAudioSegmentData>(typeData)) {
                         segment->audio = std::make_shared<AudioStreamingPart>(std::move(part->result->data), "ogg", false);
                         _currentEndpointMapping = segment->audio->getEndpointMapping();
                     } else if (const auto videoData = absl::get_if<PendingVideoSegmentData>(typeData)) {
@@ -910,7 +910,7 @@ public:
                         }
                         videoSegment->part = std::make_shared<VideoStreamingPart>(std::move(part->result->data), VideoStreamingPart::ContentType::Video);
                         segment->video.push_back(videoSegment);
-                    } else if (const auto videoData = absl::get_if<PendingUnifiedSegmentData>(typeData)) {
+                    } else if (absl::get_if<PendingUnifiedSegmentData>(typeData)) {
                         auto unifiedSegment = std::make_shared<UnifiedSegment>();
                         if (part->result->data.empty()) {
                             RTC_LOG(LS_INFO) << "Unified part " << segment->timestamp << " is empty";
@@ -986,11 +986,11 @@ public:
         };
 
         const auto typeData = &part->typeData;
-        if (const auto audioData = absl::get_if<PendingAudioSegmentData>(typeData)) {
+        if (absl::get_if<PendingAudioSegmentData>(typeData)) {
             part->task = _requestAudioBroadcastPart(segmentTimestamp, _segmentDuration, handleResult);
         } else if (const auto videoData = absl::get_if<PendingVideoSegmentData>(typeData)) {
             part->task = _requestVideoBroadcastPart(segmentTimestamp, _segmentDuration, videoData->channelId, videoData->quality, handleResult);
-        } else if (const auto unifiedData = absl::get_if<PendingUnifiedSegmentData>(typeData)) {
+        } else if (absl::get_if<PendingUnifiedSegmentData>(typeData)) {
             part->task = _requestVideoBroadcastPart(segmentTimestamp, _segmentDuration, 1, VideoChannelDescription::Quality::Full, handleResult);
         }
     }
