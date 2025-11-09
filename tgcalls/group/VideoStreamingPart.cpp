@@ -846,7 +846,7 @@ public:
     }
     
     bool hasRemainingFrames() const {
-        return !_parsedVideoParts.empty();
+        return !_parsedVideoParts.empty() || !_parsedAudioParts.empty();
     }
 
     int getAudioRemainingMilliseconds() {
