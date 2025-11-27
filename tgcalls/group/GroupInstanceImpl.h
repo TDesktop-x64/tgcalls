@@ -92,6 +92,7 @@ enum class GroupConnectionMode {
 struct GroupNetworkState {
     bool isConnected = false;
     bool isTransitioningFromBroadcastToRtc = false;
+    GroupConnectionMode connectionMode = GroupConnectionMode::GroupConnectionModeRtc;
 };
 
 enum class VideoContentType {
