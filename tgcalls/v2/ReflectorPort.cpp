@@ -158,7 +158,14 @@ standaloneReflectorRoleId_(standaloneReflectorRoleId) {
     }
     
     auto rawPeerTag = parseHex(args.config->credentials.password);
-    peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
+    if (rawPeerTag.size() == 16) {
+        peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
+    } else {
+        for (int i = 0; i < 16; i++) {
+            uint8_t zero = 0;
+            peer_tag_.AppendData(&zero, 1);
+        }
+    }
     peer_tag_.AppendData((uint8_t *)&randomTag_, 4);
 }
 
@@ -201,7 +208,14 @@ standaloneReflectorRoleId_(standaloneReflectorRoleId) {
     }
     
     auto rawPeerTag = parseHex(args.config->credentials.password);
-    peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
+    if (rawPeerTag.size() == 16) {
+        peer_tag_.AppendData(rawPeerTag.data(), rawPeerTag.size() - 4);
+    } else {
+        for (int i = 0; i < 16; i++) {
+            uint8_t zero = 0;
+            peer_tag_.AppendData(&zero, 1);
+        }
+    }
     peer_tag_.AppendData((uint8_t *)&randomTag_, 4);
 }
 
