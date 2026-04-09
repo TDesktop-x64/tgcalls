@@ -1,6 +1,7 @@
 #ifndef TGCALLS_SIGNALING_H
 #define TGCALLS_SIGNALING_H
 
+#include <cstdint>
 #include <string>
 #include <vector>
 

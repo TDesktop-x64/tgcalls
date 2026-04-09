@@ -2,6 +2,7 @@
 #define TGCALLS_SIGNALING_SCTP_CONNECTION_H_
 
 #ifdef WEBRTC_WIN
+#include <cstdint>
 #include <WinSock2.h>
 #endif // WEBRTC_WIN
 

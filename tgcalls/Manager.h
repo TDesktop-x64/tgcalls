@@ -1,6 +1,7 @@
 #ifndef TGCALLS_MANAGER_H
 #define TGCALLS_MANAGER_H
 
+#include <cstdint>
 #include "ThreadLocalObject.h"
 #include "EncryptedConnection.h"
 #include "NetworkManager.h"

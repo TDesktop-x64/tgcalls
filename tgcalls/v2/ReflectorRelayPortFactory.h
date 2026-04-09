@@ -1,6 +1,7 @@
 #ifndef TGCALLS_REFLECTOR_RELAY_PORT_FACTORY_H
 #define TGCALLS_REFLECTOR_RELAY_PORT_FACTORY_H
 
+#include <cstdint>
 #include "p2p/client/relay_port_factory_interface.h"
 
 #include "Instance.h"
