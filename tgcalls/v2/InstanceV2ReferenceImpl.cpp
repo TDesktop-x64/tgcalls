@@ -846,6 +846,9 @@ public:
             if (!strong) {
                 return;
             }
+            if (strong->_isStopped.load()) {
+                return;
+            }
 
             auto stats = call->GetStats();
             float sendBitrateKbps = ((float)stats.send_bandwidth_bps / 1024.0f);
@@ -1453,6 +1456,7 @@ public:
     }
 
     void stop(std::function<void(FinalState)> completion) {
+        _isStopped = true;
         _peerConnection->Close();
 
         FinalState finalState;
@@ -1635,6 +1639,7 @@ private:
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> _audioDeviceModule;
 
     bool _isBatteryLow = false;
+    std::atomic<bool> _isStopped{false};
 
     std::shared_ptr<rtc::VideoSinkInterface<webrtc::VideoFrame>> _currentStrongSink;
 
