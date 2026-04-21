@@ -723,13 +723,13 @@ absl::optional<MediaStateMessage> MediaStateMessage_parse(json11::Json::object c
             RTC_LOG(LS_ERROR) << "Signaling: videoRotation must be a number";
             return absl::nullopt;
         }
-        if (videoState->second.int_value() == 0) {
+        if (videoRotation->second.int_value() == 0) {
             message.videoRotation = MediaStateMessage::VideoRotation::Rotation0;
-        } else if (videoState->second.int_value() == 90) {
+        } else if (videoRotation->second.int_value() == 90) {
             message.videoRotation = MediaStateMessage::VideoRotation::Rotation90;
-        } else if (videoState->second.int_value() == 180) {
+        } else if (videoRotation->second.int_value() == 180) {
             message.videoRotation = MediaStateMessage::VideoRotation::Rotation180;
-        } else if (videoState->second.int_value() == 270) {
+        } else if (videoRotation->second.int_value() == 270) {
             message.videoRotation = MediaStateMessage::VideoRotation::Rotation270;
         } else {
             RTC_LOG(LS_ERROR) << "Signaling: videoRotation must be one of [0, 90, 180, 270]";
