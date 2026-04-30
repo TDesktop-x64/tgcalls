@@ -3197,7 +3197,7 @@ public:
         webrtc::BitrateConstraints preferences;
         webrtc::BitrateSettings settings;
         if (_getVideoSource) {
-            settings.min_bitrate_bps = _minOutgoingVideoBitrateKbit * 1024;
+            preferences.min_bitrate_bps = _minOutgoingVideoBitrateKbit * 1024;
             if (resetStartBitrate) {
                 preferences.start_bitrate_bps = std::max(preferences.min_bitrate_bps, 400 * 1000);
             }
