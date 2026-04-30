@@ -1,6 +1,7 @@
 #ifndef TGCALLS_GROUP_INSTANCE_IMPL_H
 #define TGCALLS_GROUP_INSTANCE_IMPL_H
 
+#include <cstdint>
 #include <functional>
 #include <vector>
 #include <string>
@@ -183,6 +184,7 @@ struct GroupInstanceDescriptor {
     std::vector<VideoCodecName> videoCodecPreferences;
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> requestMediaChannelDescriptions;
     int minOutgoingVideoBitrateKbit{100};
+    std::function<void(std::string const &)> dataChannelMessageReceived;
     std::function<void(bool)> onMutedSpeechActivityDetected;
     std::function<std::vector<uint8_t>(std::vector<uint8_t> const &, int64_t, bool, int32_t)> e2eEncryptDecrypt;
     bool isConference{false};

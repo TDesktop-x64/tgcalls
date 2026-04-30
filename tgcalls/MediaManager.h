@@ -1,6 +1,7 @@
 #ifndef TGCALLS_MEDIA_MANAGER_H
 #define TGCALLS_MEDIA_MANAGER_H
 
+#include <cstdint>
 #include "rtc_base/thread.h"
 #include "rtc_base/copy_on_write_buffer.h"
 #include "rtc_base/third_party/sigslot/sigslot.h"

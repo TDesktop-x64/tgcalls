@@ -1,5 +1,5 @@
-#ifndef TGCALLS_INSTANCEV2_REFERENCE_IMPL_H
-#define TGCALLS_INSTANCEV2_REFERENCE_IMPL_H
+#ifndef TGCALLS_INSTANCEV2_COMPAT_IMPL_H
+#define TGCALLS_INSTANCEV2_COMPAT_IMPL_H
 
 #include <cstdint>
 #include "Instance.h"
@@ -13,12 +13,12 @@ class Manager;
 template <typename T>
 class ThreadLocalObject;
 
-class InstanceV2ReferenceImplInternal;
+class InstanceV2CompatImplInternal;
 
-class InstanceV2ReferenceImpl final : public Instance {
+class InstanceV2CompatImpl final : public Instance {
 public:
-	explicit InstanceV2ReferenceImpl(Descriptor &&descriptor);
-	~InstanceV2ReferenceImpl() override;
+	explicit InstanceV2CompatImpl(Descriptor &&descriptor);
+	~InstanceV2CompatImpl() override;
 
 	void receiveSignalingData(const std::vector<uint8_t> &data) override;
 	void setVideoCapture(std::shared_ptr<VideoCaptureInterface> videoCapture) override;
@@ -37,6 +37,8 @@ public:
 	void setOutputVolume(float level) override;
 	void setAudioOutputDuckingEnabled(bool enabled) override;
     void setIsLowBatteryLevel(bool isLowBatteryLevel) override;
+    void addExternalAudioSamples(std::vector<uint8_t> &&samples) override {
+    }
     static std::vector<std::string> GetVersions();
     static int GetConnectionMaxLayer();
 	std::string getLastError() override;
@@ -50,7 +52,7 @@ public:
 
 private:
     std::shared_ptr<Threads> _threads;
-	std::unique_ptr<ThreadLocalObject<InstanceV2ReferenceImplInternal>> _internal;
+	std::unique_ptr<ThreadLocalObject<InstanceV2CompatImplInternal>> _internal;
 	std::unique_ptr<LogSinkImpl> _logSink;
 
 };
