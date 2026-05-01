@@ -327,7 +327,6 @@ func (s *SFU) Join(participantID int, joinPayloadJSON string, iceControlling boo
 		// Broadcast updated SSRC list to all participants (after data channel is ready).
 		// Small delay to let the data channel establish.
 		time.Sleep(500 * time.Millisecond)
-		s.broadcastActiveSSRCs()
 		s.broadcastActiveVideoSSRCs()
 
 		s.forwardRTP(p)
@@ -883,38 +882,6 @@ func (s *SFU) SetNetworkParams(participantID int, direction int, delayMs, jitter
 		participantID, dirName, delayMs, jitterMs, dropRate, bandwidthBps)
 }
 
-// broadcastActiveSSRCs sends the current set of active audio SSRCs to all connected participants.
-// Each participant receives a list excluding their own SSRC.
-func (s *SFU) broadcastActiveSSRCs() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Collect all audio SSRCs per participant.
-	participantSSRCs := make(map[int]uint32) // participantID -> audioSSRC
-	for ssrc, info := range s.ssrcRegistry {
-		if info.kind == "audio" {
-			if _, exists := participantSSRCs[info.participantID]; !exists {
-				participantSSRCs[info.participantID] = ssrc
-			}
-		}
-	}
-
-	for id, p := range s.participants {
-		var ssrcs []int32
-		for otherID, ssrc := range participantSSRCs {
-			if otherID == id {
-				continue
-			}
-			ssrcs = append(ssrcs, int32(ssrc))
-		}
-
-		msg := buildActiveSSRCsMessage(ssrcs)
-		if err := p.SendText(msg); err != nil {
-			s.log.Debugf("SendText to participant %d: %v", id, err)
-		}
-	}
-}
-
 // broadcastActiveVideoSSRCs sends the current set of active video SSRCs to all connected participants.
 // Each participant receives a list excluding their own video SSRCs.
 func (s *SFU) broadcastActiveVideoSSRCs() {
@@ -983,18 +950,6 @@ func buildActiveVideoSSRCsMessage(entries []videoSSRCEntry) string {
 	return string(data)
 }
 
-func buildActiveSSRCsMessage(ssrcs []int32) string {
-	buf := []byte(`{"colibriClass":"ActiveAudioSsrcs","ssrcs":[`)
-	for i, ssrc := range ssrcs {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-		buf = append(buf, fmt.Sprintf("%d", ssrc)...)
-	}
-	buf = append(buf, ']', '}')
-	return string(buf)
-}
-
 // Leave removes a participant from the SFU, closes their transport,
 // and broadcasts updated SSRC lists to remaining participants.
 func (s *SFU) Leave(participantID int) error {
@@ -1058,7 +1013,6 @@ func (s *SFU) Leave(participantID int) error {
 	s.log.Infof("Participant %d left", participantID)
 
 	// Broadcast updated SSRC lists to remaining participants.
-	s.broadcastActiveSSRCs()
 	s.broadcastActiveVideoSSRCs()
 
 	return nil
