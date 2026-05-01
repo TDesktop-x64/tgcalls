@@ -1047,77 +1047,11 @@ private:
 
     void onDataChannelMessage(std::string const &msg) {
         // Forward all data channel messages to the application.
+        // Audio SSRCs are discovered reactively from incoming RTP via
+        // a frame-transformer tap (added in a follow-up commit); video
+        // channel requests are app-driven via setRequestedVideoChannels.
         if (_dataChannelMessageReceived) {
             _dataChannelMessageReceived(msg);
-        }
-
-        // Parse JSON message.
-        std::string err;
-        auto json = json11::Json::parse(msg, err);
-        if (!err.empty()) return;
-
-        auto colibriClass = json["colibriClass"].string_value();
-        if (colibriClass == "ActiveAudioSsrcs") {
-            handleActiveAudioSsrcs(json);
-        }
-        // ActiveVideoSsrcs and SenderVideoConstraints are handled by the
-        // application via dataChannelMessageReceived — the app calls
-        // setRequestedVideoChannels() in response.
-    }
-
-    void handleActiveAudioSsrcs(json11::Json const &json) {
-        auto ssrcArray = json["ssrcs"].array_items();
-
-        std::set<uint32_t> newSsrcs;
-        for (const auto& item : ssrcArray) {
-            uint32_t ssrc = static_cast<uint32_t>(static_cast<int32_t>(item.int_value()));
-            if (ssrc != 0) {
-                newSsrcs.insert(ssrc);
-            }
-        }
-
-        // Diff against current set.
-        bool changed = false;
-
-        // Add new SSRCs.
-        std::vector<uint32_t> ssrcsToRequest;
-        for (uint32_t ssrc : newSsrcs) {
-            if (_remoteSsrcs.find(ssrc) == _remoteSsrcs.end()) {
-                // Assign a new mid. Mids "0" is our audio, "1" might be data channel.
-                // Use incrementing counter starting from 10 to avoid collision.
-                std::string mid = std::to_string(_nextMid++);
-
-                RemoteSsrcInfo info;
-                info.mid = mid;
-                _remoteSsrcs.emplace(ssrc, std::move(info));
-                ssrcsToRequest.push_back(ssrc);
-                changed = true;
-
-                RTC_LOG(LS_INFO) << "GroupRef: New remote SSRC " << ssrc << " (mid=" << mid << ")";
-            }
-        }
-
-        // Remove gone SSRCs.
-        for (auto it = _remoteSsrcs.begin(); it != _remoteSsrcs.end(); ) {
-            if (newSsrcs.find(it->first) == newSsrcs.end()) {
-                RTC_LOG(LS_INFO) << "GroupRef: Removing SSRC " << it->first;
-                it = _remoteSsrcs.erase(it);
-                changed = true;
-            } else {
-                ++it;
-            }
-        }
-
-        if (changed) {
-            renegotiate();
-        }
-
-        // Request media channel descriptions for new SSRCs.
-        if (!ssrcsToRequest.empty() && _requestMediaChannelDescriptions) {
-            _requestMediaChannelDescriptions(ssrcsToRequest,
-                [](std::vector<MediaChannelDescription>&&) {
-                    // Descriptions received. For audio-only test, we don't need to act on them.
-                });
         }
     }
 
