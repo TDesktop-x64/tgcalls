@@ -12,6 +12,7 @@
 #include <mutex>
 #include <random>
 #include <fstream>
+#include <set>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -226,6 +227,7 @@ int main(int argc, char* argv[]) {
     bool enableVideo = false;
     int churnCycles = 100;
     std::string networkScenario;
+    std::set<int> mutedParticipants;
 
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--duration" && i + 1 < argc) {
@@ -254,6 +256,16 @@ int main(int argc, char* argv[]) {
             churnCycles = std::atoi(argv[++i]);
         } else if (std::string(argv[i]) == "--network-scenario" && i + 1 < argc) {
             networkScenario = argv[++i];
+        } else if (std::string(argv[i]) == "--mute-participants" && i + 1 < argc) {
+            std::string list = argv[++i];
+            size_t pos = 0;
+            while (pos < list.size()) {
+                size_t next = list.find(',', pos);
+                if (next == std::string::npos) next = list.size();
+                std::string idStr = list.substr(pos, next - pos);
+                if (!idStr.empty()) mutedParticipants.insert(std::atoi(idStr.c_str()));
+                pos = next + 1;
+            }
         } else if (std::string(argv[i]) == "--delay" && i + 1 < argc) {
             std::string delayStr = argv[++i];
             auto dashPos = delayStr.find('-');
@@ -309,7 +321,7 @@ int main(int argc, char* argv[]) {
 
     // Group mode: dispatch to separate implementation
     if (mode == "group") {
-        return runGroupMode(participants, referenceParticipants, duration, gQuiet, enableVideo, networkScenario);
+        return runGroupMode(participants, referenceParticipants, duration, gQuiet, enableVideo, networkScenario, mutedParticipants);
     }
     if (mode == "group-churn") {
         return runGroupChurnMode(participants, referenceParticipants, duration, gQuiet, enableVideo, churnCycles);

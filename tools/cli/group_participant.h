@@ -80,12 +80,17 @@ public:
 struct ParticipantState {
     int id;
     bool isReference;
+    bool muted{false};
     std::unique_ptr<tgcalls::GroupInstanceInterface> instance;
     std::atomic<bool> connected{false};
     std::atomic<bool> wasConnected{false};
     std::atomic<bool> receivedAudio{false};
     uint32_t audioSsrc{0};
     std::string logPath;
+
+    // Per-source-SSRC max audio level observed via audioLevelsUpdated.
+    std::mutex audioLevelsMutex;
+    std::map<uint32_t, float> maxAudioLevelPerSsrc;
 
     // Video fields
     std::string endpointId;
@@ -112,7 +117,7 @@ struct GroupValidationResult {
 // ---------------------------------------------------------------------------
 
 // Creates a fully initialized participant: builds descriptor, creates instance,
-// joins SFU, sets join response, unmutes. Returns nullptr on failure.
+// joins SFU, sets join response, unmutes (unless `muted=true`). Returns nullptr on failure.
 std::unique_ptr<ParticipantState> createParticipant(
     int id,
     bool isReference,
@@ -120,7 +125,8 @@ std::unique_ptr<ParticipantState> createParticipant(
     std::shared_ptr<tgcalls::Threads> threads,
     bool quiet,
     bool video,
-    std::vector<std::unique_ptr<ParticipantState>>* allStates
+    std::vector<std::unique_ptr<ParticipantState>>* allStates,
+    bool muted = false
 );
 
 // Clean teardown: GoSfu_Leave, stop video, stop instance, reset.

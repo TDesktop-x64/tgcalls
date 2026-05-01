@@ -11,7 +11,7 @@
 // CGo header
 #include "submodules/TgVoipWebrtc/tgcalls/tools/go_sfu/go_sfu.h"
 
-int runGroupMode(int customParticipants, int referenceParticipants, int duration, bool quiet, bool video, const std::string& networkScenario) {
+int runGroupMode(int customParticipants, int referenceParticipants, int duration, bool quiet, bool video, const std::string& networkScenario, const std::set<int>& mutedParticipants) {
     gGroupQuiet = quiet;
     gGroupStartTime = std::chrono::steady_clock::now();
 
@@ -46,7 +46,8 @@ int runGroupMode(int customParticipants, int referenceParticipants, int duration
 
     for (int i = 0; i < participants; ++i) {
         bool isReference = (i >= customParticipants);
-        auto state = createParticipant(i, isReference, sfuHandle, threads, quiet, video, &states);
+        bool muted = mutedParticipants.count(i) > 0;
+        auto state = createParticipant(i, isReference, sfuHandle, threads, quiet, video, &states, muted);
         if (!state) {
             anyFailed = true;
             continue;

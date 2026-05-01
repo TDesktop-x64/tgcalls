@@ -48,6 +48,20 @@ namespace tgcalls {
 
 namespace {
 
+// SFU JSON uses RFC 5245 ICE candidate type names ("host", "srflx", "prflx",
+// "relay"). cricket::Candidate stores its type using WebRTC-internal names
+// ("local", "stun", "prflx", "relay" — see api/candidate.cc). Without this
+// mapping, "host"/"srflx" candidates trip RTC_DCHECK(c.is_relay()) in
+// p2p/base/connection.cc:86 (GetRtcEventLogCandidateType) because none of
+// is_local()/is_stun()/is_prflx()/is_relay() returns true.
+absl::string_view mapIceCandidateTypeToInternal(const std::string &type) {
+    if (type == "host") return cricket::LOCAL_PORT_TYPE;
+    if (type == "srflx") return cricket::STUN_PORT_TYPE;
+    if (type == "prflx") return cricket::PRFLX_PORT_TYPE;
+    if (type == "relay") return cricket::RELAY_PORT_TYPE;
+    return type;
+}
+
 // --- PeerConnection observer adapter ---
 
 class GRPeerConnectionObserver : public webrtc::PeerConnectionObserver {
@@ -130,6 +144,90 @@ private:
     std::function<void(webrtc::RTCError)> _onFailure;
 };
 
+// --- Per-receiver audio level sink ---
+//
+// Computes a peak amplitude for one remote audio track by sinking decoded PCM
+// samples from PeerConnection. The polling timer reads `consumeLevel()` to
+// build `audioLevelsUpdated` reports — a sink that has not received any
+// samples since the last poll returns 0 and is skipped, so we never report a
+// level for a known-but-silent SSRC.
+class GRAudioLevelSink : public webrtc::AudioTrackSinkInterface {
+public:
+    void OnData(const void* audio_data,
+                int bits_per_sample,
+                int /*sample_rate*/,
+                size_t number_of_channels,
+                size_t number_of_frames) override {
+        if (bits_per_sample != 16 || !audio_data) return;
+        const int16_t* samples = static_cast<const int16_t*>(audio_data);
+        const size_t total = number_of_channels * number_of_frames;
+        if (total == 0) return;
+
+        int32_t peak = 0;
+        for (size_t i = 0; i < total; ++i) {
+            int32_t s = samples[i];
+            int32_t a = (s < 0) ? -s : s;
+            if (a > peak) peak = a;
+        }
+
+        std::lock_guard<std::mutex> lock(_mu);
+        if (peak > _runningPeak) _runningPeak = peak;
+        _samplesAccumulated += total;
+    }
+
+    // Returns peak amplitude observed since last call, normalized so a
+    // full-scale sine wave (peak = 32768) reads ~1.0. Concretely: peak is
+    // divided by `INT16_MAX / sqrt(2)`, matching RFC 6464's convention that
+    // 0 dBov corresponds to a full-scale sine — the same reference CustomImpl
+    // uses (CustomImpl reads the sender-encoded RTP audio-level extension and
+    // applies `pow(10, -dbov/20)`). Returns 0 if no samples arrived since the
+    // last call. Clamped to [0, 1] for non-sine signals whose crest factor
+    // exceeds sqrt(2).
+    float consumeLevel() {
+        int32_t peak;
+        size_t samples;
+        {
+            std::lock_guard<std::mutex> lock(_mu);
+            peak = _runningPeak;
+            samples = _samplesAccumulated;
+            _runningPeak = 0;
+            _samplesAccumulated = 0;
+        }
+        if (samples == 0) return 0.0f;
+        // 32768 / sqrt(2) ≈ 23170.475 — peak amplitude of a 0-dBov sine.
+        constexpr float kZeroDbovSinePeak = 23170.475f;
+        float level = static_cast<float>(peak) / kZeroDbovSinePeak;
+        if (level > 1.0f) level = 1.0f;
+        return level;
+    }
+
+    void attachTo(webrtc::AudioTrackInterface* track) {
+        if (_attachedTrack.get() == track) return;
+        detach();
+        if (track) {
+            track->AddSink(this);
+            _attachedTrack = webrtc::scoped_refptr<webrtc::AudioTrackInterface>(track);
+        }
+    }
+
+    void detach() {
+        if (_attachedTrack) {
+            _attachedTrack->RemoveSink(this);
+            _attachedTrack = nullptr;
+        }
+    }
+
+    ~GRAudioLevelSink() override {
+        detach();
+    }
+
+private:
+    std::mutex _mu;
+    int32_t _runningPeak{0};
+    size_t _samplesAccumulated{0};
+    webrtc::scoped_refptr<webrtc::AudioTrackInterface> _attachedTrack;
+};
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -157,6 +255,9 @@ public:
         if (_peerConnection) {
             _peerConnection->Close();
         }
+        _threads->getWorkerThread()->BlockingCall([this]() {
+            _audioDeviceModule = nullptr;
+        });
     }
 
     void start() {
@@ -166,9 +267,14 @@ public:
         // video transceiver is sendonly (no receive side). Unsignaled video packets
         // will be routed to the recvonly incoming video transceiver.
 
-        // 1. Create AudioDeviceModule.
+        // 1. Create AudioDeviceModule on the worker thread — platform ADMs (notably
+        //    iOS) assert on the worker thread during Init/Terminate and touch
+        //    AVAudioSession; mirrors GroupInstanceCustomImpl's worker-thread ADM
+        //    creation.
         auto taskQueueFactory = webrtc::CreateDefaultTaskQueueFactory();
-        _audioDeviceModule = _createAudioDeviceModule(taskQueueFactory.get());
+        _threads->getWorkerThread()->BlockingCall([this, taskQueueFactoryPtr = taskQueueFactory.get()]() {
+            _audioDeviceModule = _createAudioDeviceModule(taskQueueFactoryPtr);
+        });
 
         // 2. Create PeerConnectionFactory.
         webrtc::PeerConnectionFactoryDependencies deps;
@@ -500,7 +606,7 @@ public:
             c.set_protocol(candidate.protocol);
             c.set_priority(priority);
             c.set_address(rtc::SocketAddress(candidate.ip, port));
-            c.set_type(candidate.type);
+            c.set_type(mapIceCandidateTypeToInternal(candidate.type));
 
             auto iceCandidate = webrtc::CreateIceCandidate(bundleMid, 0, c);
             if (iceCandidate) {
@@ -610,15 +716,26 @@ public:
                     audioContent->set_direction(webrtc::RtpTransceiverDirection::kSendRecv);
                 } else {
                     // --- Recvonly audio transceiver: answer with sendonly ---
-                    // Don't include SSRCs — the SFU forwards raw RTP from CustomImpl
-                    // whose mid extension IDs don't match this PeerConnection's mapping,
-                    // so packets arrive as unsignaled streams on mid=0. Including SSRCs
-                    // here would conflict with those unsignaled stream registrations.
+                    // Include the remote SSRC so PeerConnection's AudioRtpReceiver
+                    // calls SetRawAudioSink for that specific SSRC; without a
+                    // signaled SSRC the receiver uses SetDefaultRawAudioSink and
+                    // only one transceiver wins the unsignaled stream, while the
+                    // others' RemoteAudioSource never receives PCM and our
+                    // GRAudioLevelSink::OnData never fires. MID is excluded from
+                    // the m-line below so BUNDLE demux falls back to SSRC.
                     audioContent->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kAudioLevelUri, 1));
                     audioContent->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTimeUri, 2));
                     audioContent->AddRtpHeaderExtension(webrtc::RtpExtension(webrtc::RtpExtension::kTransportSequenceNumberUri, 3));
 
                     audioContent->set_direction(webrtc::RtpTransceiverDirection::kSendOnly);
+
+                    auto ssrcIt = midToSsrc.find(mid);
+                    if (ssrcIt != midToSsrc.end()) {
+                        cricket::StreamParams stream;
+                        stream.cname = "sfu-audio";
+                        stream.add_ssrc(ssrcIt->second);
+                        audioContent->AddStream(stream);
+                    }
                 }
 
                 cricket::ContentInfo ci(cricket::MediaProtocolType::kRtp);
@@ -745,7 +862,7 @@ public:
                 c.set_protocol(candidate.protocol);
                 c.set_priority(priority);
                 c.set_address(rtc::SocketAddress(candidate.ip, port));
-                c.set_type(candidate.type);
+                c.set_type(mapIceCandidateTypeToInternal(candidate.type));
 
                 // Add to the first transport (bundled).
                 auto iceCandidate = webrtc::CreateIceCandidate(bundleMids[0], 0, c);
@@ -972,7 +1089,7 @@ private:
 
                 RemoteSsrcInfo info;
                 info.mid = mid;
-                _remoteSsrcs[ssrc] = info;
+                _remoteSsrcs.emplace(ssrc, std::move(info));
                 ssrcsToRequest.push_back(ssrc);
                 changed = true;
 
@@ -1196,6 +1313,7 @@ private:
 
     void onRenegotiationComplete() {
         wirePendingVideoSinks();
+        wireRemoteAudioLevelSinks();
 
         _isRenegotiating = false;
         if (_pendingRenegotiation) {
@@ -1343,16 +1461,20 @@ private:
         if (!_audioLevelsUpdated || !_peerConnection) return;
         if (_remoteSsrcs.empty()) return;
 
-        // Report a synthetic level for all known remote SSRCs.
-        // We know audio is being received and decoded (bitrate stats confirm this)
-        // but can't extract actual levels because the SFU forwards RTP with
-        // extension IDs that may not match this PeerConnection's mapping.
+        // Read computed peak amplitudes from each per-receiver sink. Sinks
+        // that have not produced samples since the last poll return 0 — we
+        // skip emitting an entry for them so the application is not told
+        // about phantom levels for SSRCs that exist but aren't producing
+        // audio.
+        constexpr float kVoiceThreshold = 0.02f;
         GroupLevelsUpdate update;
-        for (const auto& [ssrc, info] : _remoteSsrcs) {
+        for (auto& [ssrc, info] : _remoteSsrcs) {
+            if (!info.levelSink) continue;
+            float level = info.levelSink->consumeLevel();
             GroupLevelUpdate entry;
             entry.ssrc = ssrc;
-            entry.value.level = 0.1f;
-            entry.value.voice = true;
+            entry.value.level = level;
+            entry.value.voice = level >= kVoiceThreshold;
             update.updates.push_back(entry);
         }
 
@@ -1361,10 +1483,32 @@ private:
         }
     }
 
+    // Attach a GRAudioLevelSink to every remote audio receiver track that
+    // doesn't already have one. Called after each successful renegotiation
+    // (recvonly audio transceivers are added there). OnTrack does not fire
+    // for locally-added recvonly transceivers, so we wire here instead.
+    void wireRemoteAudioLevelSinks() {
+        for (auto& [ssrc, info] : _remoteSsrcs) {
+            if (info.levelSink) continue;
+            if (!info.transceiver) continue;
+
+            auto receiver = info.transceiver->receiver();
+            if (!receiver) continue;
+            auto track = receiver->track();
+            if (!track || track->kind() != webrtc::MediaStreamTrackInterface::kAudioKind) continue;
+
+            auto* audioTrack = static_cast<webrtc::AudioTrackInterface*>(track.get());
+            info.levelSink = std::make_unique<GRAudioLevelSink>();
+            info.levelSink->attachTo(audioTrack);
+            RTC_LOG(LS_INFO) << "GroupRef: wired audio level sink for SSRC " << ssrc;
+        }
+    }
+
 private:
     struct RemoteSsrcInfo {
         std::string mid;
         webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver;
+        std::unique_ptr<GRAudioLevelSink> levelSink;
     };
 
     // Remote video endpoints.

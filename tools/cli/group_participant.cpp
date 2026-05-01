@@ -89,11 +89,13 @@ std::unique_ptr<ParticipantState> createParticipant(
     std::shared_ptr<tgcalls::Threads> threads,
     bool quiet,
     bool video,
-    std::vector<std::unique_ptr<ParticipantState>>* allStates
+    std::vector<std::unique_ptr<ParticipantState>>* allStates,
+    bool muted
 ) {
     auto state = std::make_unique<ParticipantState>();
     state->id = id;
     state->isReference = isReference;
+    state->muted = muted;
     state->logPath = "/tmp/tgcalls_group_p" + std::to_string(id) + "_" + std::to_string(getpid()) + ".log";
 
     std::string tag = "P" + std::to_string(id);
@@ -116,6 +118,7 @@ std::unique_ptr<ParticipantState> createParticipant(
         }
     };
     descriptor.audioLevelsUpdated = [statePtr, tag](tgcalls::GroupLevelsUpdate const &update) {
+        std::lock_guard<std::mutex> lock(statePtr->audioLevelsMutex);
         for (const auto& level : update.updates) {
             if (level.value.level > 0.01f) {
                 groupLog(tag.c_str(), "audio level: ssrc=%u level=%.3f voice=%d",
@@ -123,6 +126,10 @@ std::unique_ptr<ParticipantState> createParticipant(
             }
             if (level.ssrc != 0 && level.value.level > 0.05f) {
                 statePtr->receivedAudio.store(true);
+            }
+            if (level.ssrc != 0) {
+                auto& slot = statePtr->maxAudioLevelPerSsrc[level.ssrc];
+                if (level.value.level > slot) slot = level.value.level;
             }
         }
     };
@@ -311,9 +318,9 @@ std::unique_ptr<ParticipantState> createParticipant(
     groupLog(tag.c_str(), "SFU join response: %zu bytes", response.size());
 
     state->instance->setJoinResponsePayload(response);
-    state->instance->setIsMuted(false);
+    state->instance->setIsMuted(state->muted);
 
-    groupLog(tag.c_str(), "joined and unmuted");
+    groupLog(tag.c_str(), "joined (%s)", state->muted ? "muted" : "unmuted");
     return state;
 }
 
@@ -402,8 +409,65 @@ GroupValidationResult validateGroupState(
         }
     }
 
-    result.success = (result.connectedCount == result.totalParticipants &&
-                      result.audioReceivedCount == result.totalParticipants);
+    // Audio-level invariant: no peer may report a muted participant's SSRC at
+    // a non-trivial level. The synthetic 0.1 level reported by a buggy
+    // ReferenceImpl will trip this check; a real PCM-derived level reads ~0
+    // for an audio track that is producing silence (set_enabled(false)).
+    constexpr float kMutedLevelThreshold = 0.05f;
+    bool mutedInvariantHeld = true;
+
+    // Determine: is the test only validating connection/audio? In a full
+    // group the existing audioReceivedCount check requires every participant
+    // (including muted ones) to receive audio from someone — that's still
+    // valid as long as at least one peer is unmuted, but a muted participant
+    // can't produce audio for OTHERS, so we relax: every UNMUTED participant
+    // must have receivedAudio.
+    int unmutedReceived = 0;
+    int unmutedTotal = 0;
+    for (const auto& s : states) {
+        if (!s->muted) {
+            unmutedTotal++;
+            if (s->receivedAudio.load()) unmutedReceived++;
+        }
+    }
+
+    for (const auto& muted : states) {
+        if (!muted->muted || muted->audioSsrc == 0) continue;
+        for (const auto& peer : states) {
+            if (peer.get() == muted.get()) continue;
+            std::lock_guard<std::mutex> lock(peer->audioLevelsMutex);
+            auto it = peer->maxAudioLevelPerSsrc.find(muted->audioSsrc);
+            float maxLevel = (it != peer->maxAudioLevelPerSsrc.end()) ? it->second : 0.0f;
+            if (maxLevel >= kMutedLevelThreshold) {
+                groupLog("Validate",
+                         "FAIL: P%d (%s) reported muted P%d (ssrc=%u) at level %.3f (>= %.3f)",
+                         peer->id, peer->isReference ? "ref" : "custom",
+                         muted->id, muted->audioSsrc, maxLevel, kMutedLevelThreshold);
+                mutedInvariantHeld = false;
+            } else {
+                groupLog("Validate",
+                         "OK:   P%d (%s) reported muted P%d (ssrc=%u) at max level %.3f",
+                         peer->id, peer->isReference ? "ref" : "custom",
+                         muted->id, muted->audioSsrc, maxLevel);
+            }
+        }
+    }
+
+    bool hasMuted = false;
+    for (const auto& s : states) {
+        if (s->muted) { hasMuted = true; break; }
+    }
+
+    if (hasMuted) {
+        // Relaxed audio-received check: only unmuted participants are required
+        // to receive remote audio.
+        result.success = (result.connectedCount == result.totalParticipants &&
+                          unmutedReceived == unmutedTotal &&
+                          mutedInvariantHeld);
+    } else {
+        result.success = (result.connectedCount == result.totalParticipants &&
+                          result.audioReceivedCount == result.totalParticipants);
+    }
     if (video && result.videoExpectedPairs > 0) {
         result.success = result.success && (result.videoReceivedPairs >= result.videoExpectedPairs);
     }
