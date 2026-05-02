@@ -20,6 +20,8 @@
 #include "api/jsep_ice_candidate.h"
 #include "api/candidate.h"
 #include "api/units/time_delta.h"
+#include "api/stats/rtc_stats_collector_callback.h"
+#include "api/stats/rtcstats_objects.h"
 #include "pc/session_description.h"
 
 #include "pc/peer_connection.h"
@@ -29,10 +31,14 @@
 #include "rtc_base/network.h"
 #include "rtc_base/rtc_certificate_generator.h"
 #include "rtc_base/helpers.h"
+#include "rtc_base/time_utils.h"
 
 #include "modules/audio_processing/audio_buffer.h"
 
 #include "platform/PlatformInterface.h"
+#ifdef WEBRTC_IOS
+#include "platform/darwin/iOS/tgcalls_audio_device_module_ios.h"
+#endif
 
 #include "group/GroupJoinPayloadInternal.h"
 
@@ -144,6 +150,19 @@ private:
     std::function<void(webrtc::RTCError)> _onFailure;
 };
 
+// --- Stats collector observer adapter ---
+
+class GRStatsObserver : public webrtc::RTCStatsCollectorCallback {
+public:
+    explicit GRStatsObserver(std::function<void(rtc::scoped_refptr<const webrtc::RTCStatsReport>)> cb)
+        : _cb(std::move(cb)) {}
+    void OnStatsDelivered(const rtc::scoped_refptr<const webrtc::RTCStatsReport>& report) override {
+        if (_cb) _cb(report);
+    }
+private:
+    std::function<void(rtc::scoped_refptr<const webrtc::RTCStatsReport>)> _cb;
+};
+
 // --- Per-receiver audio level sink ---
 //
 // Computes a peak amplitude for one remote audio track by sinking decoded PCM
@@ -155,13 +174,19 @@ class GRAudioLevelSink : public webrtc::AudioTrackSinkInterface {
 public:
     void OnData(const void* audio_data,
                 int bits_per_sample,
-                int /*sample_rate*/,
+                int sample_rate,
                 size_t number_of_channels,
                 size_t number_of_frames) override {
         if (bits_per_sample != 16 || !audio_data) return;
         const int16_t* samples = static_cast<const int16_t*>(audio_data);
         const size_t total = number_of_channels * number_of_frames;
         if (total == 0) return;
+
+        if (!_loggedFirstSamples) {
+            _loggedFirstSamples = true;
+            RTC_LOG(LS_WARNING) << "GroupRef levelSink: first OnData total=" << total
+                                << " sampleRate=" << sample_rate;
+        }
 
         int32_t peak = 0;
         for (size_t i = 0; i < total; ++i) {
@@ -226,6 +251,140 @@ private:
     int32_t _runningPeak{0};
     size_t _samplesAccumulated{0};
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> _attachedTrack;
+    bool _loggedFirstSamples = false;
+};
+
+// --- Audio SSRC-discovery tap ---
+//
+// Single instance installed on mid=0's receiver (the catch-all for
+// unsignaled audio SSRCs). The first packet for an unknown SSRC arrives
+// at mid=0; the voice channel constructs an unsignaled WebRtcAudioReceiveStream
+// and attaches this transformer (because it is the channel's
+// `unsignaled_frame_transformer_`). Transform() then notifies discovery on
+// first-sight per SSRC and passes the frame straight through to the stream's
+// depacketizer/decoder so the discovery-window audio plays normally.
+//
+// No buffering. After renegotiation propagates the SSRC to a recvonly
+// transceiver, the BUNDLE demuxer routes packets to the per-receiver
+// transformer (`GRPerReceiverAudioTransformer`); this tap stops seeing them.
+//
+// E2E note: this tap intentionally does NOT decrypt. SSRC lives in the
+// unencrypted RTP header, so discovery works on encrypted frames as-is.
+// Decryption belongs on the per-receiver transformer (per-user keys).
+class GRAudioFrameTransformer : public webrtc::FrameTransformerInterface {
+public:
+    using SsrcCallback = std::function<void(uint32_t ssrc)>;
+
+    explicit GRAudioFrameTransformer(SsrcCallback onNewSsrc)
+        : _onNewSsrc(std::move(onNewSsrc)) {}
+
+    void Transform(std::unique_ptr<webrtc::TransformableFrameInterface> frame) override {
+        if (!frame) return;
+        const uint32_t ssrc = frame->GetSsrc();
+
+        bool notifyDiscovery = false;
+        rtc::scoped_refptr<webrtc::TransformedFrameCallback> sink;
+        {
+            webrtc::MutexLock lock(&_mu);
+            if (_seen.size() < kMaxSeen && _seen.insert(ssrc).second) {
+                notifyDiscovery = true;
+            }
+            sink = _sink;
+        }
+
+        if (notifyDiscovery && _onNewSsrc) {
+            _onNewSsrc(ssrc);
+        }
+        if (sink) {
+            sink->OnTransformedFrame(std::move(frame));
+        }
+    }
+
+    void RegisterTransformedFrameCallback(
+            rtc::scoped_refptr<webrtc::TransformedFrameCallback> cb) override {
+        webrtc::MutexLock lock(&_mu);
+        _sink = std::move(cb);
+    }
+    void RegisterTransformedFrameSinkCallback(
+            rtc::scoped_refptr<webrtc::TransformedFrameCallback>,
+            uint32_t) override {}
+    void UnregisterTransformedFrameCallback() override {
+        webrtc::MutexLock lock(&_mu);
+        _sink = nullptr;
+    }
+    void UnregisterTransformedFrameSinkCallback(uint32_t) override {}
+
+private:
+    static constexpr size_t kMaxSeen = 256;
+
+    SsrcCallback _onNewSsrc;
+
+    webrtc::Mutex _mu;
+    rtc::scoped_refptr<webrtc::TransformedFrameCallback> _sink RTC_GUARDED_BY(_mu);
+    std::set<uint32_t> _seen RTC_GUARDED_BY(_mu);
+};
+
+// Pass-through frame transformer instantiated once per recvonly audio
+// receiver. Installed in renegotiate() right after AddTransceiver, BEFORE
+// the SDP cycle assigns the signaled SSRC, so the transformer is propagated
+// to the per-stream ChannelReceive when SetRemoteDescription processes the
+// answer. Each receiver gets its OWN instance — sharing one instance
+// across multiple receivers triggers Register{Sink,}TransformedFrameCallback
+// last-writer-wins overwrites (verified empirically in the abandoned Task 7).
+//
+// Today this is pure pass-through (forwards every frame unchanged via the
+// registered broadcast sink). The e2e PR will add a `decryptHook` that
+// runs in Transform() before OnTransformedFrame. Per-receiver state (e.g.,
+// per-user key derivation) lives on this instance; shared state lives in a
+// separate refcounted object passed in at construction.
+class GRPerReceiverAudioTransformer : public webrtc::FrameTransformerInterface {
+public:
+    void Transform(std::unique_ptr<webrtc::TransformableFrameInterface> frame) override {
+        if (!frame) return;
+        const uint32_t ssrc = frame->GetSsrc();
+        rtc::scoped_refptr<webrtc::TransformedFrameCallback> sink;
+        bool logFirst = false;
+        {
+            webrtc::MutexLock lock(&_mu);
+            sink = _sink;
+            if (!_loggedFirstTransform) {
+                _loggedFirstTransform = true;
+                logFirst = true;
+            }
+        }
+        if (logFirst) {
+            RTC_LOG(LS_WARNING) << "GroupRef perRecv[" << this << "]: first Transform ssrc="
+                                << ssrc << " sink=" << (sink ? "ok" : "null");
+        }
+        if (sink) sink->OnTransformedFrame(std::move(frame));
+    }
+
+    void RegisterTransformedFrameCallback(
+            rtc::scoped_refptr<webrtc::TransformedFrameCallback> cb) override {
+        RTC_LOG(LS_WARNING) << "GroupRef perRecv[" << this << "]: Register callback="
+                            << cb.get();
+        webrtc::MutexLock lock(&_mu);
+        _sink = std::move(cb);
+    }
+    void RegisterTransformedFrameSinkCallback(
+            rtc::scoped_refptr<webrtc::TransformedFrameCallback> cb,
+            uint32_t ssrc) override {
+        RTC_LOG(LS_WARNING) << "GroupRef perRecv[" << this << "]: RegisterSink ssrc="
+                            << ssrc << " callback=" << cb.get();
+    }
+    void UnregisterTransformedFrameCallback() override {
+        RTC_LOG(LS_WARNING) << "GroupRef perRecv[" << this << "]: Unregister";
+        webrtc::MutexLock lock(&_mu);
+        _sink = nullptr;
+    }
+    void UnregisterTransformedFrameSinkCallback(uint32_t ssrc) override {
+        RTC_LOG(LS_WARNING) << "GroupRef perRecv[" << this << "]: UnregisterSink ssrc=" << ssrc;
+    }
+
+private:
+    webrtc::Mutex _mu;
+    rtc::scoped_refptr<webrtc::TransformedFrameCallback> _sink RTC_GUARDED_BY(_mu);
+    bool _loggedFirstTransform RTC_GUARDED_BY(_mu) = false;
 };
 
 } // anonymous namespace
@@ -241,8 +400,12 @@ public:
         , _networkStateUpdated(std::move(descriptor.networkStateUpdated))
         , _audioLevelsUpdated(std::move(descriptor.audioLevelsUpdated))
         , _createAudioDeviceModule(std::move(descriptor.createAudioDeviceModule))
+        , _createWrappedAudioDeviceModule(std::move(descriptor.createWrappedAudioDeviceModule))
+        , _onMutedSpeechActivityDetected(std::move(descriptor.onMutedSpeechActivityDetected))
         , _requestMediaChannelDescriptions(std::move(descriptor.requestMediaChannelDescriptions))
         , _outgoingAudioBitrateKbit(descriptor.outgoingAudioBitrateKbit)
+        , _disableAudioInput(descriptor.disableAudioInput)
+        , _enableSystemMute(descriptor.ios_enableSystemMute)
         , _videoContentType(descriptor.videoContentType)
         , _videoCodecPreferences(std::move(descriptor.videoCodecPreferences))
         , _getVideoSource(std::move(descriptor.getVideoSource))
@@ -260,6 +423,61 @@ public:
         });
     }
 
+    // Mirrors GroupInstanceCustomImpl::createAudioDeviceModule. The wrapped path
+    // (production iOS shared-ADM) is preferred so the resulting child enrolls
+    // itself as an active transport in the shared multiplexer when WebRTC calls
+    // RegisterAudioCallback. Without that registration, the PeerConnection's
+    // audio output sink is never wired into NeedMorePlayData and playout stays
+    // silent (Finding 3 in the real-call audio investigation). Falls back to
+    // raw `_createAudioDeviceModule` (then Init + wrapAudioDeviceModule) and,
+    // ultimately, to the platform-default ADM. AudioDeviceDataObserver and the
+    // screencast `_externalAudioRecorder` branches from CustomImpl have no
+    // counterpart here and are intentionally omitted.
+    webrtc::scoped_refptr<WrappedAudioDeviceModule> createAudioDeviceModule(webrtc::TaskQueueFactory *taskQueueFactory) {
+        auto onMutedSpeechActivityDetected = _onMutedSpeechActivityDetected;
+#ifdef WEBRTC_IOS
+        bool disableRecording = _disableAudioInput;
+        bool enableSystemMute = _enableSystemMute;
+#endif
+        const auto create = [&](webrtc::AudioDeviceModule::AudioLayer layer) {
+#ifdef WEBRTC_IOS
+            auto result = rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, disableRecording, enableSystemMute, disableRecording ? 2 : 1);
+            if (result) {
+                result->mutedSpeechDetectionChanged = ^(bool value) {
+                    if (onMutedSpeechActivityDetected) {
+                        onMutedSpeechActivityDetected(value);
+                    }
+                };
+            }
+            return result;
+#else
+            return webrtc::AudioDeviceModule::Create(layer, taskQueueFactory);
+#endif
+        };
+        const auto check = [&](const webrtc::scoped_refptr<webrtc::AudioDeviceModule> &result) -> webrtc::scoped_refptr<WrappedAudioDeviceModule> {
+            if (!result) {
+                return nullptr;
+            }
+            if (result->Init() == 0) {
+                return PlatformInterface::SharedInstance()->wrapAudioDeviceModule(result);
+            } else {
+                return nullptr;
+            }
+        };
+        if (_createWrappedAudioDeviceModule) {
+            auto result = _createWrappedAudioDeviceModule(taskQueueFactory);
+            if (result) {
+                return result;
+            }
+        }
+        if (_createAudioDeviceModule) {
+            if (const auto result = check(_createAudioDeviceModule(taskQueueFactory))) {
+                return result;
+            }
+        }
+        return check(create(webrtc::AudioDeviceModule::kPlatformDefaultAudio));
+    }
+
     void start() {
         const auto weak = std::weak_ptr<GroupInstanceReferenceInternal>(shared_from_this());
 
@@ -270,10 +488,12 @@ public:
         // 1. Create AudioDeviceModule on the worker thread — platform ADMs (notably
         //    iOS) assert on the worker thread during Init/Terminate and touch
         //    AVAudioSession; mirrors GroupInstanceCustomImpl's worker-thread ADM
-        //    creation.
+        //    creation. The helper prefers `_createWrappedAudioDeviceModule` when
+        //    set (production iOS shared-ADM path) so the resulting child registers
+        //    itself as an active transport in the shared multiplexer.
         auto taskQueueFactory = webrtc::CreateDefaultTaskQueueFactory();
         _threads->getWorkerThread()->BlockingCall([this, taskQueueFactoryPtr = taskQueueFactory.get()]() {
-            _audioDeviceModule = _createAudioDeviceModule(taskQueueFactoryPtr);
+            _audioDeviceModule = createAudioDeviceModule(taskQueueFactoryPtr);
         });
 
         // 2. Create PeerConnectionFactory.
@@ -391,6 +611,29 @@ public:
             }
             params.encodings[0].max_bitrate_bps = _outgoingAudioBitrateKbit * 1024;
             _outgoingAudioTransceiver->sender()->SetParameters(params);
+
+            // Install the SSRC-discovery tap on mid=0's receiver. mid=0 is the
+            // catch-all for unsignaled audio: the first packet for an unknown
+            // SSRC arrives at mid=0's voice channel, which constructs an
+            // unsignaled WebRtcAudioReceiveStream and attaches this transformer
+            // (it lives in `unsignaled_frame_transformer_`). The tap notifies
+            // discovery once per SSRC and passes the frame straight through —
+            // discovery-window audio plays normally via mid=0's stream until
+            // renegotiation hands the SSRC off to a recvonly transceiver
+            // (`GRPerReceiverAudioTransformer`), at which point the BUNDLE
+            // demuxer routes packets there and this tap stops seeing them.
+            _audioFrameTransformer = rtc::make_ref_counted<GRAudioFrameTransformer>(
+                [weak, threads = _threads](uint32_t ssrc) {
+                    threads->getMediaThread()->PostTask([weak, ssrc]() {
+                        if (auto strong = weak.lock()) {
+                            strong->handleDiscoveredAudioSsrc(ssrc);
+                        }
+                    });
+                });
+            _outgoingAudioTransceiver->receiver()
+                ->SetDepacketizerToDecoderFrameTransformer(_audioFrameTransformer);
+
+            startStatsLogging();
 
             _outgoingAudioTrack->set_enabled(false); // Muted by default.
         }
@@ -891,6 +1134,7 @@ public:
 
     void stop(std::function<void()> completion) {
         _isPollingAudioLevels = false;
+        _isLoggingStats = false;
         if (_peerConnection) {
             _peerConnection->Close();
         }
@@ -1002,7 +1246,19 @@ public:
         sendReceiverVideoConstraints(channels);
     }
     void getStats(std::function<void(GroupInstanceStats)> completion) {
-        if (completion) completion(GroupInstanceStats{});
+        if (!_peerConnection) {
+            if (completion) completion(GroupInstanceStats{});
+            return;
+        }
+        const auto weak = std::weak_ptr<GroupInstanceReferenceInternal>(shared_from_this());
+        auto observer = rtc::make_ref_counted<GRStatsObserver>(
+            [weak, completion = std::move(completion)](rtc::scoped_refptr<const webrtc::RTCStatsReport> report) {
+                if (auto strong = weak.lock()) {
+                    strong->logAudioStatsFromReport(std::move(report));
+                }
+                if (completion) completion(GroupInstanceStats{});
+            });
+        _peerConnection->GetStats(observer.get());
     }
     void internal_addCustomNetworkEvent(bool) {}
 
@@ -1055,6 +1311,23 @@ private:
         }
     }
 
+    static constexpr int kDiscoveryRenegotiationDelayMs = 250;
+
+    void scheduleDiscoveryRenegotiation() {
+        if (_discoveryRenegotiationScheduled) return;
+        _discoveryRenegotiationScheduled = true;
+
+        const auto weak = std::weak_ptr<GroupInstanceReferenceInternal>(shared_from_this());
+        _threads->getMediaThread()->PostDelayedTask(
+            [weak]() {
+                auto strong = weak.lock();
+                if (!strong) return;
+                strong->_discoveryRenegotiationScheduled = false;
+                strong->renegotiate();
+            },
+            webrtc::TimeDelta::Millis(kDiscoveryRenegotiationDelayMs));
+    }
+
     void renegotiate() {
         // Serialize renegotiations: if one is already in flight, defer.
         if (_isRenegotiating) {
@@ -1076,7 +1349,22 @@ private:
                 auto result = _peerConnection->AddTransceiver(cricket::MEDIA_TYPE_AUDIO, init);
                 if (result.ok()) {
                     info.transceiver = result.value();
-                    RTC_LOG(LS_INFO) << "GroupRef: Added recvonly transceiver for SSRC " << ssrc;
+                    // Install a per-receiver pass-through transformer BEFORE SDP negotiation
+                    // assigns the signaled SSRC. AudioRtpReceiver stores it on the receiver
+                    // member field; when Reconfigure runs later (during SetRemoteDescription
+                    // processing of the answer's m-line), media_channel propagates it to the
+                    // newly-created ChannelReceive's frame_transformer_delegate_, which calls
+                    // RegisterTransformedFrameCallback on our instance. Without this, the
+                    // signaled stream constructs with frame_transformer=nullptr (because mid=N's
+                    // channel has unsignaled_frame_transformer_=nullptr — only mid=0's channel
+                    // has it set), and the e2e PR's decrypt hook would have no attachment point.
+                    info.perReceiverTransformer =
+                        rtc::make_ref_counted<GRPerReceiverAudioTransformer>();
+                    info.transceiver->receiver()
+                        ->SetDepacketizerToDecoderFrameTransformer(info.perReceiverTransformer);
+                    RTC_LOG(LS_WARNING) << "GroupRef: Added recvonly transceiver for SSRC " << ssrc
+                                        << " perRecvTransformer=" << info.perReceiverTransformer.get()
+                                        << " receiver=" << info.transceiver->receiver().get();
                 }
             }
         }
@@ -1372,6 +1660,55 @@ private:
         }
     }
 
+    void logAudioStatsFromReport(rtc::scoped_refptr<const webrtc::RTCStatsReport> report) {
+        for (const auto& stats : *report) {
+            if (stats.type() != std::string("inbound-rtp")) continue;
+            const auto& inbound = stats.cast_to<webrtc::RTCInboundRtpStreamStats>();
+            if (!inbound.kind.has_value() || inbound.kind.value() != "audio") continue;
+            RTC_LOG(LS_WARNING)
+                << "GroupRef stats:"
+                << " ssrc=" << inbound.ssrc.value_or(0)
+                << " packets=" << inbound.packets_received.value_or(0)
+                << " bytes=" << inbound.bytes_received.value_or(0)
+                << " audioLevel=" << inbound.audio_level.value_or(0.0)
+                << " totalSamples=" << inbound.total_samples_received.value_or(0)
+                << " concealedSamples=" << inbound.concealed_samples.value_or(0)
+                << " jitterBufferEmittedCount=" << inbound.jitter_buffer_emitted_count.value_or(0);
+        }
+    }
+
+    void startStatsLogging() {
+        if (_isLoggingStats) return;
+        _isLoggingStats = true;
+        scheduleStatsLog();
+    }
+
+    void scheduleStatsLog() {
+        const auto weak = std::weak_ptr<GroupInstanceReferenceInternal>(shared_from_this());
+        _threads->getMediaThread()->PostDelayedTask(
+            [weak]() {
+                auto strong = weak.lock();
+                if (!strong) return;
+                strong->pollStatsForLogging();
+                if (strong->_isLoggingStats) {
+                    strong->scheduleStatsLog();
+                }
+            },
+            webrtc::TimeDelta::Millis(kStatsLogIntervalMs));
+    }
+
+    void pollStatsForLogging() {
+        if (!_peerConnection) return;
+        const auto weak = std::weak_ptr<GroupInstanceReferenceInternal>(shared_from_this());
+        auto observer = rtc::make_ref_counted<GRStatsObserver>(
+            [weak](rtc::scoped_refptr<const webrtc::RTCStatsReport> report) {
+                if (auto strong = weak.lock()) {
+                    strong->logAudioStatsFromReport(std::move(report));
+                }
+            });
+        _peerConnection->GetStats(observer.get());
+    }
+
     void startAudioLevelPolling() {
         if (_isPollingAudioLevels) return;
         _isPollingAudioLevels = true;
@@ -1417,6 +1754,29 @@ private:
         }
     }
 
+    // Single entry point for adding a remote audio SSRC. Runs on the
+    // media thread (posted to from the worker-thread frame transformer
+    // callback).
+    void handleDiscoveredAudioSsrc(uint32_t ssrc) {
+        if (ssrc == 0) return;
+        if (ssrc == _outgoingSsrc) return;
+        if (_remoteSsrcs.count(ssrc) > 0) return;
+
+        std::string mid = std::to_string(_nextMid++);
+        RemoteSsrcInfo info;
+        info.mid = mid;
+        _remoteSsrcs.emplace(ssrc, std::move(info));
+
+        if (_requestMediaChannelDescriptions) {
+            _requestMediaChannelDescriptions({ssrc},
+                [](std::vector<MediaChannelDescription>&&) {});
+        }
+        scheduleDiscoveryRenegotiation();
+
+        RTC_LOG(LS_INFO) << "GroupRef: queued discovered audio SSRC " << ssrc
+                         << " (mid=" << mid << ")";
+    }
+
     // Attach a GRAudioLevelSink to every remote audio receiver track that
     // doesn't already have one. Called after each successful renegotiation
     // (recvonly audio transceivers are added there). OnTrack does not fire
@@ -1443,6 +1803,7 @@ private:
         std::string mid;
         webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver;
         std::unique_ptr<GRAudioLevelSink> levelSink;
+        rtc::scoped_refptr<GRPerReceiverAudioTransformer> perReceiverTransformer;
     };
 
     // Remote video endpoints.
@@ -1458,8 +1819,12 @@ private:
     std::function<void(GroupNetworkState)> _networkStateUpdated;
     std::function<void(GroupLevelsUpdate const &)> _audioLevelsUpdated;
     std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(webrtc::TaskQueueFactory*)> _createAudioDeviceModule;
+    std::function<webrtc::scoped_refptr<WrappedAudioDeviceModule>(webrtc::TaskQueueFactory*)> _createWrappedAudioDeviceModule;
+    std::function<void(bool)> _onMutedSpeechActivityDetected;
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> _requestMediaChannelDescriptions;
     int _outgoingAudioBitrateKbit = 32;
+    bool _disableAudioInput = false;
+    bool _enableSystemMute = false;
 
     // Video configuration from descriptor.
     VideoContentType _videoContentType = VideoContentType::None;
@@ -1489,7 +1854,7 @@ private:
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> _peerConnectionFactory;
     std::unique_ptr<GRPeerConnectionObserver> _peerConnectionObserver;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> _peerConnection;
-    webrtc::scoped_refptr<webrtc::AudioDeviceModule> _audioDeviceModule;
+    webrtc::scoped_refptr<WrappedAudioDeviceModule> _audioDeviceModule;
 
     std::unique_ptr<rtc::NetworkMonitorFactory> _networkMonitorFactory;
     std::unique_ptr<rtc::BasicPacketSocketFactory> _socketFactory;
@@ -1498,6 +1863,8 @@ private:
     // Audio.
     webrtc::scoped_refptr<webrtc::AudioTrackInterface> _outgoingAudioTrack;
     webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> _outgoingAudioTransceiver;
+    // Per-receiver audio frame transformer (catch-all + every recvonly).
+    rtc::scoped_refptr<GRAudioFrameTransformer> _audioFrameTransformer;
 
     // Data channel.
     webrtc::scoped_refptr<webrtc::DataChannelInterface> _dataChannel;
@@ -1519,9 +1886,16 @@ private:
     // Audio level polling.
     bool _isPollingAudioLevels = false;
 
+    // Periodic stats logging.
+    static constexpr int kStatsLogIntervalMs = 5000;
+    bool _isLoggingStats = false;
+
     // Renegotiation serialization.
     bool _isRenegotiating = false;
     bool _pendingRenegotiation = false;
+
+    // Discovery-renegotiation debounce.
+    bool _discoveryRenegotiationScheduled = false;
 
     // State.
     bool _isConnected = false;

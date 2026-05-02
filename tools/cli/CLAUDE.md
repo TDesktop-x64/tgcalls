@@ -25,10 +25,10 @@ In-process test harness for tgcalls. See the root `CLAUDE.md` for build instruct
 - ICE: lite mode, loopback-only, UDP host candidates on 127.0.0.1. SFU uses `Dial` (controlling) for CustomImpl clients and `Accept` (controlled) for PeerConnection clients
 - DTLS: SFU acts as DTLS client (setup=active); GroupNetworkManager hardcodes SSL_SERVER for the tgcalls client
 - SRTP: AES-256-GCM (negotiated via DTLS-SRTP; GroupNetworkManager requires GCM suites)
-- SCTP: over DTLS, accepts data channel from client, reads Colibri messages, sends `ActiveAudioSsrcs` and `ActiveVideoSsrcs` notifications
+- SCTP: over DTLS, accepts data channel from client, reads Colibri messages, sends `ActiveVideoSsrcs` notifications
 - RTP forwarding: audio RTP forwarded to all others unconditionally; video RTP forwarded only to receivers that have requested video from that sender (via `ReceiverVideoConstraints`)
 - SSRC tracking: SFU maintains `ssrcRegistry map[uint32]ssrcInfo` with kind (audio/video/video-rtx) and simulcast layer index, exposed via `GoSfu_QuerySsrc` and `GoSfu_QueryVideoSsrcs` CGo exports
-- SSRC discovery: SFU broadcasts `ActiveAudioSsrcs` and `ActiveVideoSsrcs` over data channel when participants connect
+- SSRC discovery: video SSRCs are broadcast via `ActiveVideoSsrcs` (the test app's `dataChannelMessageReceived` callback consumes them and calls `setRequestedVideoChannels`). Audio SSRCs are discovered by `GroupInstanceReferenceImpl`'s per-receiver `GRAudioFrameTransformer` directly from incoming RTP — same shape CustomImpl uses (`receiveUnknownSsrcPacket` → `_requestMediaChannelDescriptions`). The legacy `ActiveAudioSsrcs` data-channel message has been removed.
 - Video SSRC groups: parsed from join payload `"ssrc-groups"` field (SIM + FID semantics), stored per participant
 - Colibri video constraints: SFU parses `ReceiverVideoConstraints` from receivers, sends `SenderVideoConstraints` back to senders with `idealHeight`, and sends proactive PLI to trigger keyframes when a receiver first requests video
 - RTCP feedback: SFU demuxes SRTCP from the shared ICE transport (RFC 5761: byte[1] >= 200 && < 224), decrypts with per-participant SRTCP contexts, parses PLI/FIR, and forwards as new PLI to the sender. NACK is terminated (not forwarded).
