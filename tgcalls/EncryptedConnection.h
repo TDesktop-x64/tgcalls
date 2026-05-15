@@ -1,6 +1,7 @@
 #ifndef TGCALLS_ENCRYPTED_CONNECTION_H
 #define TGCALLS_ENCRYPTED_CONNECTION_H
 
+#include <cstdint>
 #include "Instance.h"
 #include "Message.h"
 

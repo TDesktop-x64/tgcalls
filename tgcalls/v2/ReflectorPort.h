@@ -1,6 +1,7 @@
 #ifndef TGCALLS_REFLECTOR_PORT_H_
 #define TGCALLS_REFLECTOR_PORT_H_
 
+#include <cstdint>
 #include <stdio.h>
 
 #include <list>
