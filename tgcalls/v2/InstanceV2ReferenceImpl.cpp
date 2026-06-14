@@ -528,19 +528,10 @@ public:
             }
 
             bool isConnected = false;
-            bool isFailed = false;
-
             switch (state) {
-                case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected: {
-                    isConnected = true;
-                    break;
-                }
+                case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionConnected:
                 case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionCompleted: {
                     isConnected = true;
-                    break;
-                }
-                case webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed: {
-                    isFailed = true;
                     break;
                 }
                 default: {
@@ -548,12 +539,11 @@ public:
                 }
             }
 
-            if (strong->_isConnected != isConnected || strong->_isFailed != isFailed) {
-                strong->_isConnected = isConnected;
-                strong->_isFailed = isFailed;
-
-                strong->onNetworkStateUpdated();
+            if (state == webrtc::PeerConnectionInterface::IceConnectionState::kIceConnectionFailed) {
+                strong->maybeRestartIce();
             }
+
+            strong->updateIsConnected(isConnected);
         };
         delegateParameters.onDataChannel = [weak](webrtc::scoped_refptr<webrtc::DataChannelInterface> dataChannel) {
             const auto strong = weak.lock();
@@ -859,6 +849,43 @@ public:
 
             strong->beginCheckConnectionTimer();
         }, webrtc::TimeDelta::Millis(1000));
+    }
+
+    void updateIsConnected(bool isConnected) {
+        if (_isConnected == isConnected) {
+            return;
+        }
+        _isConnected = isConnected;
+
+        if (isConnected) {
+            onNetworkStateUpdated();
+        } else {
+            _lastDisconnectedTimestamp = rtc::TimeMillis();
+
+            // The legacy ICE state reports kIceConnectionDisconnected on a ~2.5s
+            // receiving timeout, so brief loss blips would surface as Reconnecting
+            // episodes. Only report (and log) the disconnect if it persists.
+            int32_t generation = ++_disconnectReportGeneration;
+            const auto weak = std::weak_ptr<InstanceV2ReferenceImplInternal>(shared_from_this());
+            _threads->getMediaThread()->PostDelayedTask([weak, generation]() {
+                const auto strong = weak.lock();
+                if (!strong) {
+                    return;
+                }
+                if (strong->_isStopped.load()) {
+                    return;
+                }
+                if (generation != strong->_disconnectReportGeneration) {
+                    return;
+                }
+                if (!strong->_isConnected) {
+                    strong->onNetworkStateUpdated();
+                }
+            }, webrtc::TimeDelta::Millis(2000));
+        }
+    }
+
+    void maybeRestartIce() {
     }
 
     void writeStateLogRecords() {
