@@ -886,6 +886,25 @@ public:
     }
 
     void maybeRestartIce() {
+        if (_isFailed) {
+            return;
+        }
+        // Restart only from the offerer side: ICE failure is symmetric, so the
+        // offerer observes it too, and a single restart offer (new ufrag/pwd)
+        // re-pairs both directions without offer glare.
+        if (!_encryptionKey.isOutgoing) {
+            return;
+        }
+
+        int64_t timestamp = rtc::TimeMillis();
+        const int64_t minRestartIntervalMs = 5000;
+        if (_lastIceRestartTimestamp != 0 && _lastIceRestartTimestamp + minRestartIntervalMs > timestamp) {
+            return;
+        }
+        _lastIceRestartTimestamp = timestamp;
+
+        RTC_LOG(LS_INFO) << "InstanceV2ReferenceImpl: requesting ICE restart";
+        _peerConnection->RestartIce();
     }
 
     void writeStateLogRecords() {
