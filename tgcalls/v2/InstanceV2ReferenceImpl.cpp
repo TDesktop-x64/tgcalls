@@ -756,6 +756,8 @@ public:
         beginSignaling();
 
         beginLogTimer(0);
+        _lastDisconnectedTimestamp = rtc::TimeMillis();
+        beginCheckConnectionTimer();
     }
 
     void sendPendingSignalingServiceData(int cause) {
@@ -832,6 +834,31 @@ public:
 
             strong->beginLogTimer(1000);
         }, webrtc::TimeDelta::Millis(delayMs));
+    }
+
+    void beginCheckConnectionTimer() {
+        const auto weak = std::weak_ptr<InstanceV2ReferenceImplInternal>(shared_from_this());
+        _threads->getMediaThread()->PostDelayedTask([weak]() {
+            auto strong = weak.lock();
+            if (!strong) {
+                return;
+            }
+            if (strong->_isStopped.load()) {
+                return;
+            }
+
+            int64_t currentTimestamp = rtc::TimeMillis();
+            const int64_t maxTimeout = 20000;
+
+            if (!strong->_isConnected && !strong->_isFailed && strong->_lastDisconnectedTimestamp + maxTimeout < currentTimestamp) {
+                RTC_LOG(LS_INFO) << "InstanceV2ReferenceImpl: connection timeout " << (currentTimestamp - strong->_lastDisconnectedTimestamp) << " ms";
+
+                strong->_isFailed = true;
+                strong->onNetworkStateUpdated();
+            }
+
+            strong->beginCheckConnectionTimer();
+        }, webrtc::TimeDelta::Millis(1000));
     }
 
     void writeStateLogRecords() {
@@ -1596,6 +1623,9 @@ private:
 
     bool _isConnected = false;
     bool _isFailed = false;
+    int64_t _lastDisconnectedTimestamp = 0;
+    int32_t _disconnectReportGeneration = 0;
+    int64_t _lastIceRestartTimestamp = 0;
     absl::optional<InstanceNetworking::ConnectionDescription> _currentConnectionDescription;
 
     absl::optional<NetworkStateLogRecord> _currentNetworkStateLogRecord;
