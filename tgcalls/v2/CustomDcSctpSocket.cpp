@@ -1821,7 +1821,7 @@ CustomDcSctpSocket::GetHandoverStateAndClose() {
     InternalClose(ErrorKind::kNoError, "handover");
   }
 
-  return std::move(state);
+  return state;
 }
 
 }  // namespace dcsctp
