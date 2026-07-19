@@ -77,6 +77,14 @@ namespace {
     }
 }
 
+[[maybe_unused]] int getCustomParameterInt(std::map<std::string, json11::Json> const &parameters, std::string const &name) {
+    const auto value = parameters.find(name);
+    if (value != parameters.end() && value->second.is_number()) {
+        return value->second.int_value();
+    }
+    return 0;
+}
+
 enum class SignalingProtocolVersion {
     V1,
     V2,
@@ -989,6 +997,17 @@ public:
         const auto weak = std::weak_ptr<InstanceV2ImplInternal>(shared_from_this());
 
         if (_signalingProtocolVersion == SignalingProtocolVersion::V3 && !getCustomParameterBool(_customParameters, "network_signaling_nosctp")) {
+            SignalingSctpConnection::Options sctpOptions;
+            if (int v = getCustomParameterInt(_customParameters, "network_sctp_t1_init_ms")) {
+                sctpOptions.t1InitTimeoutMs = v;
+            }
+            if (int v = getCustomParameterInt(_customParameters, "network_sctp_t1_cookie_ms")) {
+                sctpOptions.t1CookieTimeoutMs = v;
+            }
+            if (int v = getCustomParameterInt(_customParameters, "network_sctp_max_backoff_ms")) {
+                sctpOptions.maxBackoffMs = v;
+            }
+
             _signalingConnection = std::make_shared<SignalingSctpConnection>(
                 _threads,
                 [threads = _threads, weak](const std::vector<uint8_t> &data) {
@@ -1003,7 +1022,9 @@ public:
                 },
                 [signalingDataEmitted = _signalingDataEmitted](const std::vector<uint8_t> &data) {
                     signalingDataEmitted(data);
-                }
+                },
+                _encryptionKey.isOutgoing,
+                sctpOptions
             );
         }
         if (!_signalingConnection) {

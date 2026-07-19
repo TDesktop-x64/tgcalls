@@ -2113,6 +2113,7 @@ public:
     _activitiesUpdated(descriptor.ssrcActivityUpdated),
     _onAudioFrame(descriptor.onAudioFrame),
     _requestMediaChannelDescriptions(descriptor.requestMediaChannelDescriptions),
+    _dataChannelMessageReceived(descriptor.dataChannelMessageReceived),
     _requestCurrentTime(descriptor.requestCurrentTime),
     _requestAudioBroadcastPart(descriptor.requestAudioBroadcastPart),
     _requestVideoBroadcastPart(descriptor.requestVideoBroadcastPart),
@@ -2215,6 +2216,7 @@ public:
                 "WebRTC-VP8ConferenceTemporalLayers/1/"
                 "WebRTC-Audio-MinimizeResamplingOnMobile/Enabled/"
             	"WebRTC-BweLossExperiment/Enabled/"
+            "WebRTC-Video-DiscardPacketsWithUnknownSsrc/Enabled/"
             );
         }
 
@@ -3247,7 +3249,7 @@ public:
         webrtc::BitrateConstraints preferences;
         webrtc::BitrateSettings settings;
         if (_getVideoSource) {
-            settings.min_bitrate_bps = _minOutgoingVideoBitrateKbit * 1024;
+            preferences.min_bitrate_bps = _minOutgoingVideoBitrateKbit * 1024;
             if (resetStartBitrate) {
                 preferences.start_bitrate_bps = std::max(preferences.min_bitrate_bps, 400 * 1000);
             }
@@ -3406,6 +3408,11 @@ public:
     }
 
     void receiveDataChannelMessage(std::string const &message) {
+        // Forward to app callback (for ActiveVideoSsrcs, etc.)
+        if (_dataChannelMessageReceived) {
+            _dataChannelMessageReceived(message);
+        }
+
         std::string parsingError;
         auto json = json11::Json::parse(message, parsingError);
         if (json.type() != json11::Json::OBJECT) {
@@ -4477,6 +4484,7 @@ private:
     std::function<void(GroupActivitiesUpdate const &)> _activitiesUpdated;
     std::function<void(uint32_t, const AudioFrame &)> _onAudioFrame;
     std::function<std::shared_ptr<RequestMediaChannelDescriptionTask>(std::vector<uint32_t> const &, std::function<void(std::vector<MediaChannelDescription> &&)>)> _requestMediaChannelDescriptions;
+    std::function<void(std::string const &)> _dataChannelMessageReceived;
     std::function<std::shared_ptr<BroadcastPartTask>(std::function<void(int64_t)>)> _requestCurrentTime;
     std::function<std::shared_ptr<BroadcastPartTask>(int64_t, int64_t, std::function<void(BroadcastPart &&)>)> _requestAudioBroadcastPart;
     std::function<std::shared_ptr<BroadcastPartTask>(int64_t, int64_t, int32_t, VideoChannelDescription::Quality, std::function<void(BroadcastPart &&)>)> _requestVideoBroadcastPart;
